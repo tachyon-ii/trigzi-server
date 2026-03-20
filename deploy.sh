@@ -8,13 +8,13 @@ if [ -z "$VIRTUAL_ENV" ]; then
 fi
 
 echo "✅ Virtual environment detected: $VIRTUAL_ENV"
-echo "🚀 Bouncing CGIOS services..."
+echo "🚀 Bouncing Trigzi services..."
 
 # 2. Restart the Flask/Gunicorn backend
-sudo systemctl restart cgios_api
+sudo systemctl restart trigzi_api
 
 # 3. Reload Nginx to pick up routing changes 
 sudo systemctl reload nginx
 
 echo "✅ Services restarted successfully."
-sudo systemctl status cgios_api --no-pager | grep Active
+sudo systemctl status trigzi_api --no-pager | grep Active

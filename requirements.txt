@@ -1,0 +1,5 @@
+# Trigzi app requirements
+Flask
+curl_cffi
+requests
+gunicorn
