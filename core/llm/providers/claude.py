@@ -3,9 +3,10 @@ import os
 from .base import BaseProvider
 from ..filters import ClaudeRequestFilter, ClaudeResponseFilter
 from ..config import config
+from ..probe import ClaudeProbeMixin
 
 
-class ClaudeProvider(BaseProvider):
+class ClaudeProvider(ClaudeProbeMixin, BaseProvider):
 
     @property
     def provider_name(self) -> str:
@@ -31,4 +32,3 @@ class ClaudeProvider(BaseProvider):
             "x-api-key":         os.environ.get("CLAUDE_API_KEY", ""),
             "anthropic-version": "2023-06-01"
         }
-

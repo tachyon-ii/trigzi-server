@@ -3,9 +3,10 @@ import os
 from .base import BaseProvider
 from ..filters import OpenAIRequestFilter, OpenAIResponseFilter
 from ..config import config
+from ..probe import OpenAIProbeMixin
 
 
-class OpenAIProvider(BaseProvider):
+class OpenAIProvider(OpenAIProbeMixin, BaseProvider):
 
     @property
     def provider_name(self) -> str:
@@ -30,4 +31,3 @@ class OpenAIProvider(BaseProvider):
         return {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}"
         }
-

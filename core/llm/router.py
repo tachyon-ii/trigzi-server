@@ -58,6 +58,8 @@ class LLMRouter:
             return await self._execute_failover(payload, profile, model_strings, session_id, timeout)
         elif mode == "ab":
             return await self._execute_ab(payload, profile, model_strings, session_id, timeout)
+        elif mode == "cost":
+            return await self._execute_cost(payload, profile, model_strings, session_id, timeout)
 
         raise LLMError.invalid_request(f"Unknown routing mode: {mode}")
 
@@ -70,7 +72,9 @@ class LLMRouter:
             return "race"
         if optimize == "accuracy":
             return "ab"
-        return "failover"
+        if optimize == "cost":
+            return "cost"
+        return "failover"   # default: covers "failover" explicitly and any unrecognised value
 
     # MARK: - Execution engines
 
@@ -143,6 +147,34 @@ class LLMRouter:
 
         return response
 
+    async def _execute_cost(self, payload, profile, models, session_id, timeout) -> Dict[str, Any]:
+        """
+        Cost mode: select the single cheapest model across all requested
+        providers using output_per_million rates from llm_providers.json,
+        then execute as a direct call.
+        """
+        best_model_str = None
+        best_cost      = float("inf")
+
+        for model_str in models:
+            provider_key, _ = self._parse_model_string(model_str)
+            cheapest_tag    = config.cheapest_model(provider_key)
+            if cheapest_tag is None:
+                continue
+            # Normalised comparison: cost at 1M output tokens
+            cost = config.estimate_cost(cheapest_tag, input_tokens=0, output_tokens=1_000_000)
+            if cost is not None and cost < best_cost:
+                best_cost      = cost
+                best_model_str = cheapest_tag
+
+        if best_model_str is None:
+            # No costed models found — fall back to first model direct
+            print(f"⚠️  cost mode: no costed models found, falling back to {models[0]}")
+            best_model_str = models[0]
+
+        print(f"💰 cost mode: selected {best_model_str} (${best_cost:.4f}/1M output tokens)")
+        return await self._execute_direct(payload, profile, best_model_str, session_id, timeout)
+
     async def _execute_direct_silent(self, payload, profile, model_str, session_id, timeout):
         try:
             await self._execute_direct(payload, profile, model_str, session_id, timeout)
@@ -180,4 +212,3 @@ class LLMRouter:
 
 # Singleton for Flask app
 router = LLMRouter()
-

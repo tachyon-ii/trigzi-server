@@ -3,9 +3,10 @@ import os
 from .base import BaseProvider
 from ..filters import GeminiRequestFilter, GeminiResponseFilter
 from ..config import config
+from ..probe import GeminiProbeMixin
 
 
-class GeminiProvider(BaseProvider):
+class GeminiProvider(GeminiProbeMixin, BaseProvider):
 
     @property
     def provider_name(self) -> str:
@@ -30,4 +31,3 @@ class GeminiProvider(BaseProvider):
 
     def headers(self) -> dict:
         return {}
-

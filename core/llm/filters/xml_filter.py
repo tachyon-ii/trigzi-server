@@ -17,6 +17,30 @@ import json
 import re
 from typing import Any, Optional
 
+# MARK: - Usage Guide
+#
+# Two calling conventions are supported:
+#
+# 1. Class style (preferred — full feature set):
+#
+#      from core.llm.filters.xml_filter import XMLFilter
+#
+#      xml  = XMLFilter.json_schema_to_xml(schema_json, "Analyze food content.")
+#      text = XMLFilter.strip_thinking(claude_response)
+#      json = XMLFilter.xml_to_json(xml_string)
+#
+# 2. Function style (legacy shims — backwards compatibility):
+#
+#      from core.llm.filters.xml_filter import dict_to_xml, wrap_in_tag
+#
+#      xml  = dict_to_xml({"task": "Analyze", "profile": "Nut Allergy"})
+#      text = wrap_in_tag("instructions", prompt)
+#
+# The class style handles full JSON schema conversion, thinking-block
+# stripping, and round-trip XML->JSON for audit replay.
+# The function shims are kept for compatibility with filters/__init__.py
+# and existing tests — prefer the class in new code.
+
 class XMLFilter:
     """
     Static utility class for JSON/XML format conversion.
@@ -141,3 +165,17 @@ Strip your thinking — return only the final JSON object.
         if match:
             return match.group(1).strip()
         return None
+
+
+# MARK: - Module-level shims
+# Convenience functions delegating to XMLFilter for backwards compatibility
+# with imports in filters/__init__.py and test_filters.py
+
+def dict_to_xml(data: dict) -> str:
+    """Delegate to XMLFilter._serialize_to_xml for dict → XML conversion."""
+    return XMLFilter._serialize_to_xml(data, indent=0)
+
+
+def wrap_in_tag(tag: str, content: str) -> str:
+    """Wrap content string in an XML tag."""
+    return f"<{tag}>{content}</{tag}>"

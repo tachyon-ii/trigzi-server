@@ -3,3 +3,5 @@ Flask
 curl_cffi
 requests
 gunicorn
+aiohttp
+pytest-asyncio
