@@ -1,125 +1,146 @@
 #!/usr/bin/env python3
-# utils/off_lookup.py
+
+from __future__ import annotations
+
 """
-OFF suffix tree GTIN lookup.
+utils/off_lookup.py
 
-Resolves a GTIN to its sharded JSON file using the same 2-level suffix
-scheme written by off_sharder.py:
+GTIN lookup against the MariaDB products table.
 
-    {base_dir}/{last_2}/{prev_2}/{gtin}.json
+Keeps the same interface as the old file-based OFFLookup so callers
+need no changes:
 
-Examples:
-    9352042000342  →  off/42/03/9352042000342.json
-    00010191       →  off/91/01/00010191.json
-
-Usage as a module:
     from utils.off_lookup import OFFLookup
-
-    lookup = OFFLookup("/www/off")
+    lookup = OFFLookup()
     record = lookup.get("9352042000342")   # dict or None
 
-Usage as a script:
-    python utils/off_lookup.py 9352042000342
-    python utils/off_lookup.py 9352042000342 --base /www/off
+CLI:
+    ./utils/off_lookup.py 9352042000342
 """
 
-import os
 import json
 import argparse
+import sys
+import os
 from typing import Optional
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from core.db import get_conn
+
+VALID_GTIN_LENGTHS = {8, 12, 13, 14}
 
 
 class OFFLookup:
-    """
-    O(1) GTIN lookup against a sharded Open Food Facts suffix tree.
-    """
-
-    def __init__(self, base_dir: str = "/www/off"):
-        self.base_dir = base_dir
 
     def get(self, gtin: str) -> Optional[dict]:
-        """
-        Return the normalised OFF record for a GTIN, or None if not found.
-
-        Args:
-            gtin: GTIN string — digits only, any length.
-
-        Returns:
-            Parsed JSON dict or None.
-        """
-        path = self._path(gtin)
-        if path is None:
+        """Return the product record for a GTIN, or None if not found."""
+        gtin = self._clean(gtin)
+        if not gtin:
             return None
-
-        if not os.path.exists(path):
-            return None
-
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT data FROM products WHERE gtin = %s",
+                        (gtin,)
+                    )
+                    row = cur.fetchone()
+            if not row:
+                return None
+            data = row["data"]
+            return json.loads(data) if isinstance(data, str) else data
+        except Exception as e:
+            print(f"  [!] off_lookup error: {e}")
             return None
 
     def exists(self, gtin: str) -> bool:
         """Return True if a record exists for this GTIN."""
-        path = self._path(gtin)
-        return path is not None and os.path.exists(path)
+        gtin = self._clean(gtin)
+        if not gtin:
+            return False
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM products WHERE gtin = %s",
+                        (gtin,)
+                    )
+                    return cur.fetchone() is not None
+        except Exception:
+            return False
 
-    def path(self, gtin: str) -> Optional[str]:
-        """Return the expected file path for a GTIN (whether or not it exists)."""
-        return self._path(gtin)
+    def is_enriched(self, gtin: str) -> bool:
+        """Return True if the record has been LLM-enriched."""
+        gtin = self._clean(gtin)
+        if not gtin:
+            return False
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT enriched FROM products WHERE gtin = %s",
+                        (gtin,)
+                    )
+                    row = cur.fetchone()
+            return bool(row and row["enriched"])
+        except Exception:
+            return False
 
-    # MARK: - Private
-
-    def _path(self, gtin: str) -> Optional[str]:
+    def save(self, record: dict) -> bool:
         """
-        Calculate the shard path for a GTIN.
-        Mirrors get_shard_path() in off_sharder.py exactly.
-
-        Returns None if the GTIN is not a digit string.
+        Upsert an enriched record back to the database.
+        Sets enriched=1 if _enrichment_llm is present.
         """
+        gtin = self._clean(record.get("gtin", ""))
+        if not gtin:
+            return False
+        try:
+            enriched = 1 if record.get("_enrichment_llm") else 0
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO products (gtin, source, name, enriched, data)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            source     = VALUES(source),
+                            name       = VALUES(name),
+                            enriched   = VALUES(enriched),
+                            data       = VALUES(data),
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (
+                        gtin,
+                        record.get("source", "off"),
+                        record.get("name", "")[:150],
+                        enriched,
+                        json.dumps(record, ensure_ascii=False),
+                    ))
+            return True
+        except Exception as e:
+            print(f"  [!] off_lookup.save error: {e}")
+            return False
+
+    def _clean(self, gtin: str) -> Optional[str]:
         if not gtin or not isinstance(gtin, str):
             return None
-
-        # Strip whitespace; accept leading zeros
         gtin = gtin.strip()
         if not gtin.isdigit():
             return None
-
-        safe  = gtin.zfill(4)
-        l1    = safe[-2:]       # last 2 digits
-        l2    = safe[-4:-2]     # previous 2 digits
-
-        return os.path.join(self.base_dir, l1, l2, f"{gtin}.json")
+        if len(gtin) not in VALID_GTIN_LENGTHS:
+            return None
+        return gtin
 
 
-# Module-level default instance — import and use directly:
-#   from utils.off_lookup import lookup
-#   record = lookup.get("9352042000342")
+# Module-level singleton
 lookup = OFFLookup()
 
 
-# MARK: - CLI
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Look up a GTIN in the OFF suffix tree."
-    )
-    parser.add_argument("gtin",  help="GTIN to look up")
-    parser.add_argument("--base", default="/www/off",
-                        help="Base directory of the OFF shard tree (default: /www/off)")
-    parser.add_argument("--path-only", action="store_true",
-                        help="Print the resolved file path and exit")
+    parser = argparse.ArgumentParser(description="Look up a GTIN in the products DB.")
+    parser.add_argument("gtin", help="GTIN to look up")
     args = parser.parse_args()
 
-    l = OFFLookup(args.base)
-
-    if args.path_only:
-        print(l.path(args.gtin))
+    record = lookup.get(args.gtin)
+    if record:
+        print(json.dumps(record, indent=2, ensure_ascii=False))
     else:
-        record = l.get(args.gtin)
-        if record:
-            print(json.dumps(record, indent=2, ensure_ascii=False))
-        else:
-            print(f"❌ Not found: {args.gtin}")
-            print(f"   Expected: {l.path(args.gtin)}")
+        print(f"Not found: {args.gtin}")

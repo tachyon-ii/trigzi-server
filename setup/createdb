@@ -1,0 +1,80 @@
+#!/bin/sh
+#
+# create_db.sh
+#
+# Creates the MariaDB database, user, and products table for Trigzi.
+#
+# Usage:
+#   ./create_db.sh <database_name> <password>
+#
+# Example:
+#   ./create_db.sh trigzi secretpassword
+#
+
+MYSQL=mysql
+
+if [ ! $1 ] || [ ! $2 ]; then
+    if [ ! $1 ]; then
+        echo "Database name required"
+    fi
+    if [ ! $2 ]; then
+        echo "DB password required"
+    fi
+    echo "Usage: ${0} <database_name> <password>"
+    exit 1
+fi
+
+read -r -d '' SQL <<EOF
+-- ── Database & User ───────────────────────────────────────────────────────────
+
+DROP DATABASE IF EXISTS ${1};
+DROP USER IF EXISTS '${1}'@'localhost';
+
+CREATE DATABASE ${1}
+    CHARACTER SET utf8mb4
+    COLLATE utf8mb4_unicode_ci;
+
+CREATE USER '${1}'@'localhost' IDENTIFIED BY '${2}';
+GRANT ALL ON ${1}.* TO '${1}'@'localhost';
+FLUSH PRIVILEGES;
+
+USE ${1};
+
+-- ── Products table ────────────────────────────────────────────────────────────
+--
+-- gtin         Primary key — the barcode as a string (preserves leading zeros)
+-- source       Origin: "off", "woolworths", "coles"
+-- name         Denormalised for fast lookups without parsing JSON
+-- enriched     0 = raw OFF data, 1 = LLM clinical_profile present
+-- data         Full unified product JSON blob (product_schema.json)
+-- updated_at   Auto-updated on every write — used by validate worker
+--
+
+CREATE TABLE products (
+    gtin        VARCHAR(40)     NOT NULL,
+    source      VARCHAR(20)     NOT NULL DEFAULT 'off',
+    name        VARCHAR(150)    NOT NULL DEFAULT '',
+    enriched    TINYINT(1)      NOT NULL DEFAULT 0,
+    data        JSON            NOT NULL,
+    updated_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                ON UPDATE CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (gtin),
+    INDEX idx_source   (source),
+    INDEX idx_enriched (enriched),
+    INDEX idx_updated  (updated_at)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;
+
+EOF
+
+echo "Running this SQL:"
+echo ""
+echo "$SQL"
+echo ""
+echo "Please input the root password for MySQL"
+echo ""
+printf '%s\n' "$SQL" | $MYSQL -u root -p
+
+echo "Done!"

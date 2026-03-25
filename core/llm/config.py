@@ -27,6 +27,7 @@ JSON location: core/llm/llm_providers.json
 """
 
 import json
+from typing import Optional, List
 import os
 import threading
 
@@ -99,7 +100,7 @@ class LLMProviderConfig:
     # Model resolution                                                     #
     # ------------------------------------------------------------------ #
 
-    def resolve(self, model_tag: str | None, provider: str) -> str:
+    def resolve(self, model_tag: Optional[str], provider: str) -> str:
         """
         Return the full model string to use on the wire.
 
@@ -137,7 +138,7 @@ class LLMProviderConfig:
     # Hierarchy                                                            #
     # ------------------------------------------------------------------ #
 
-    def hierarchy(self, provider: str) -> list[str]:
+    def hierarchy(self, provider: str) -> List[str]:
         """
         Return the ordered model list for automatic tier selection.
 
@@ -167,12 +168,12 @@ class LLMProviderConfig:
                 .get(provider.lower(), {})
                 .get("defaultModel", provider))
 
-    def secondary_model(self, provider: str) -> str | None:
+    def secondary_model(self, provider: str) -> Optional[str]:
         """Secondary model (hierarchy index 1), or None if not configured."""
         h = self.hierarchy(provider)
         return h[1] if len(h) > 1 else None
 
-    def tertiary_model(self, provider: str) -> str | None:
+    def tertiary_model(self, provider: str) -> Optional[str]:
         """Tertiary model (hierarchy index 2), or None if not configured."""
         h = self.hierarchy(provider)
         return h[2] if len(h) > 2 else None
@@ -182,7 +183,7 @@ class LLMProviderConfig:
     # ------------------------------------------------------------------ #
 
     def estimate_cost(self, model: str, input_tokens: int,
-                      output_tokens: int) -> float | None:
+                      output_tokens: int) -> Optional[float]:
         """
         Estimate call cost in USD using per-million-token rates from config.
 
@@ -219,7 +220,7 @@ class LLMProviderConfig:
                 return bool(model_cfg.get("vision", False))
         return False
 
-    def cheapest_model(self, provider: str) -> str | None:
+    def cheapest_model(self, provider: str) -> Optional[str]:
         """
         Return the cheapest model in a provider's hierarchy by output cost.
 
@@ -253,11 +254,10 @@ class LLMProviderConfig:
     # ------------------------------------------------------------------ #
 
     @property
-    def all_provider_names(self) -> list[str]:
+    def all_provider_names(self) -> List[str]:
         """Sorted list of all configured provider names."""
         return sorted(self._config.get("providers", {}).keys())
 
 
 # Module-level singleton — import this, not the class.
 config = LLMProviderConfig()
-
