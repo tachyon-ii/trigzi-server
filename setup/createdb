@@ -7,19 +7,12 @@
 # Usage:
 #   ./create_db.sh <database_name> <password>
 #
-# Example:
-#   ./create_db.sh trigzi secretpassword
-#
 
 MYSQL=mysql
 
 if [ ! $1 ] || [ ! $2 ]; then
-    if [ ! $1 ]; then
-        echo "Database name required"
-    fi
-    if [ ! $2 ]; then
-        echo "DB password required"
-    fi
+    if [ ! $1 ]; then echo "Database name required"; fi
+    if [ ! $2 ]; then echo "DB password required"; fi
     echo "Usage: ${0} <database_name> <password>"
     exit 1
 fi
@@ -40,29 +33,59 @@ FLUSH PRIVILEGES;
 
 USE ${1};
 
+-- ── Enrichments table ─────────────────────────────────────────────────────────
+--
+-- Tracks the exact LLM model + prompt version that produced each enrichment.
+-- products.enrichment_id is a FK to this table.
+-- When a prompt is updated, re-enrichment candidates are:
+--   SELECT gtin FROM products
+--   WHERE enrichment_id IN (
+--     SELECT id FROM enrichments WHERE prompt_ver != 'extract_v3'
+--   )
+--
+
+CREATE TABLE enrichments (
+    id          INT             NOT NULL AUTO_INCREMENT,
+    task        VARCHAR(50)     NOT NULL,           -- 'product', 'ocr_analysis'
+    llm_model   VARCHAR(100)    NOT NULL,           -- 'gemini-2.5-flash'
+    prompt_ver  VARCHAR(20)     NOT NULL,           -- 'extract_v2'
+    prompt_hash CHAR(8)         NOT NULL,           -- first 8 chars SHA256 of prompt text
+    prompt_text MEDIUMTEXT      NOT NULL,           -- full prompt for exact reproduction
+    created_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (id),
+    UNIQUE KEY idx_prompt_hash (prompt_hash),      -- dedup: same prompt = same row
+    INDEX idx_task_prompt (task, prompt_ver)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;
+
 -- ── Products table ────────────────────────────────────────────────────────────
 --
--- gtin         Primary key — the barcode as a string (preserves leading zeros)
--- source       Origin: "off", "woolworths", "coles"
--- name         Denormalised for fast lookups without parsing JSON
--- enriched     0 = raw OFF data, 1 = LLM clinical_profile present
--- data         Full unified product JSON blob (product_schema.json)
--- updated_at   Auto-updated on every write — used by validate worker
+-- gtin          Primary key — normalised to 13 digits per OFF spec
+-- source        Origin: "off", "woolworths", "coles", "ocr"
+-- name          Denormalised for fast name search
+-- enrichment_id FK to enrichments — null = not yet enriched
+-- data          Full unified product JSON blob (product_schema.json)
+-- updated_at    Auto-updated on every write
 --
 
 CREATE TABLE products (
-    gtin        VARCHAR(40)     NOT NULL,
-    source      VARCHAR(20)     NOT NULL DEFAULT 'off',
-    name        VARCHAR(150)    NOT NULL DEFAULT '',
-    enriched    TINYINT(1)      NOT NULL DEFAULT 0,
-    data        JSON            NOT NULL,
-    updated_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                ON UPDATE CURRENT_TIMESTAMP,
+    gtin          VARCHAR(13)     NOT NULL,
+    source        VARCHAR(20)     NOT NULL DEFAULT 'off',
+    name          VARCHAR(150)    NOT NULL DEFAULT '',
+    enrichment_id INT             NULL,
+    data          JSON            NOT NULL,
+    updated_at    TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                  ON UPDATE CURRENT_TIMESTAMP,
 
     PRIMARY KEY (gtin),
-    INDEX idx_source   (source),
-    INDEX idx_enriched (enriched),
-    INDEX idx_updated  (updated_at)
+    INDEX idx_name        (name),
+    INDEX idx_source      (source),
+    INDEX idx_enriched    (enrichment_id),
+    INDEX idx_updated     (updated_at),
+    CONSTRAINT fk_enrichment
+        FOREIGN KEY (enrichment_id) REFERENCES enrichments(id)
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;

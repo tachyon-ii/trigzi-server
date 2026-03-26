@@ -1,0 +1,64 @@
+Extract and synthesise product information from the OCR label text below.
+The text is from a phone camera — expect some noise and formatting artefacts.
+Return ONLY these fields, one per line, in exactly this format.
+Numbers only for numeric fields (no units). Blank if unknown.
+
+name: <product name>
+brand: <brand name>
+package_size: <total package size e.g. 1000mL, 200g — calculate if needed: servings x serving size>
+serving_size: <serving size with unit e.g. 250mL, 30g>
+servings_per_package: <number>
+health_star_rating: <0.5 to 5.0 in 0.5 steps — infer from nutrition if not shown on label>
+ingredients: <comma separated list, no leading label>
+energy_kj: <number per 100ml/100g>
+calories_kcal: <number per 100ml/100g>
+protein_g: <number per 100ml/100g>
+fat_total_g: <number per 100ml/100g>
+fat_saturated_g: <number per 100ml/100g>
+carbohydrates_g: <number per 100ml/100g>
+sugars_g: <number per 100ml/100g>
+fibre_g: <number per 100ml/100g>
+sodium_mg: <number per 100ml/100g>
+fodmap: <see scale and reference table below>
+coeliac: <-1 unknown, 0 safe, 1 cross-contamination risk, 2 low level gluten, 3 high — wheat/rye/barley>
+histamine: <-1 unknown, 0 safe/fresh, 1 low, 2 moderate/liberator, 3 high — aged/fermented/cured>
+allergens: <comma separated from Top 8: Milk, Eggs, Fish, Shellfish, Tree Nuts, Peanuts, Wheat, Soy>
+summary: <one sentence gut health summary based strictly on ingredients>
+
+Rules:
+- Use per 100ml or per 100g values, not per serving
+- Strip any leading label from ingredients (INGREDIENTS:, Contains:, etc.)
+- Calculate package_size as servings_per_package x serving_size if not explicitly shown
+- Infer health_star_rating from nutrition profile if not on label
+- Rate fodmap, coeliac, histamine for the product AS CONSUMED at a typical serving
+- Return exactly these 21 fields, no extras, no JSON, no markdown, no explanation
+
+FODMAP SCALE:
+-1 = Unknown (insufficient information)
+ 0 = None/Safe (no FODMAP ingredients)
+ 1 = Low (FODMAP ingredients present but in low-FODMAP quantities)
+ 2 = Medium (portion dependent — small amounts safe, larger amounts problematic)
+ 3 = High (contains significant high-FODMAP ingredients)
+
+FODMAP REFERENCE (Monash University):
+High FODMAP — Vegetables: artichoke, asparagus, garlic, green peas, leek, mushrooms, onion, red capsicum
+High FODMAP — Fruits: apple, apple juice, cherry, dried fruit, mango, nectarine, peach, pear, plum, watermelon
+High FODMAP — Dairy: cow's milk, custard, evaporated milk, ice cream, soy milk (whole soybean), sweetened condensed milk, yoghurt, lactose-containing dairy
+High FODMAP — Protein: most legumes/pulses, some marinated or processed meats
+High FODMAP — Grains: wheat, rye, barley based breads/cereals/biscuits
+High FODMAP — Sugars: high fructose corn syrup, honey, sugar-free confectionery (polyols)
+High FODMAP — Nuts: cashews, pistachios
+
+Low FODMAP — Vegetables: eggplant, green beans, bok choy, green capsicum, carrot, cucumber, lettuce, potato
+Low FODMAP — Fruits: cantaloupe, kiwifruit, mandarin, orange, pineapple, blueberry
+Low FODMAP — Dairy: almond milk, brie/camembert, feta, hard cheeses, lactose-free milk, soy milk (soy protein isolate)
+Low FODMAP — Protein: eggs, firm tofu, plain cooked meats/poultry/seafood, tempeh
+Low FODMAP — Grains: oats, quinoa, rice/corn pasta, rice cakes, sourdough spelt, gluten-free breads
+Low FODMAP — Sugars: dark chocolate, maple syrup, rice malt syrup, table sugar
+Low FODMAP — Nuts: macadamias, peanuts, pumpkin seeds, walnuts
+
+FRONT LABEL:
+{text_front}
+
+NUTRITION & INGREDIENTS PANEL:
+{text_nutrition}

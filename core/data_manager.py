@@ -1,38 +1,42 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 """
 core/data_manager.py
 
 Product lookup and enrichment orchestrator.
 
-Case 1: Record in OFF tree, _enrichment_llm set   → return immediately
-Case 2: Record in OFF tree, not enriched           → return partial, enrich, return enriched
-Case 3: Not in OFF tree                            → return None → 404 → client offers OCR
+Case 1: Record in DB, _enrichment_llm set   → return immediately
+Case 2: Record in DB, not enriched           → enrich via LLM, return enriched
+Case 3: Not in DB                            → return None → 404 → client offers OCR
+
+Debug flags (set in environment):
+    DEBUG_FORCE_NOT_FOUND=1   — always return None (simulate Case 3)
+    DEBUG_FORCE_UNENRICHED=1  — strip enrichment, simulate Case 2
 """
 
 import os
-from typing import Optional
+import re
 import json
-import asyncio
 import time
+import random
 import urllib.request
 import urllib.error
-import random
 from socket import timeout as SocketTimeout
+from typing import Optional
+
 from utils.off_lookup import OFFLookup
 from core.telemetry import log_scan
 
-# --- Configuration ---
+# --- Config ---
 
-OFF_DIR       = "/var/www/off"
-VALIDATE_JSONL = "/var/www/trigzi/data/validate.jsonl"
-
-GEMINI_MODEL  = "gemini-2.5-flash"
-GEMINI_URL    = (
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_URL   = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent?key={{api_key}}"
 )
 
-# Non-food categories — skip LLM, stamp NOP immediately
+VALIDATE_JSONL = "/var/www/trigzi/data/validate.jsonl"
+
 NON_FOOD_CATEGORIES = {
     "Cleaning & Laundry",
     "Home & Garden",
@@ -41,16 +45,17 @@ NON_FOOD_CATEGORIES = {
     "Tobacco",
 }
 
-# --- Module-level singletons ---
+# Debug flags
+DEBUG_FORCE_NOT_FOUND   = os.environ.get("DEBUG_FORCE_NOT_FOUND",   "0") == "1"
+DEBUG_FORCE_UNENRICHED  = os.environ.get("DEBUG_FORCE_UNENRICHED",  "0") == "1"
 
-_off     = OFFLookup(OFF_DIR)
+_off     = OFFLookup()
 _api_key = os.environ.get("GEMINI_API_KEY", "")
 
 
 # --- GTIN helpers ---
 
 def _variations(gtin: str) -> list:
-    """Common retail GTIN permutations."""
     v = [gtin]
     if gtin.startswith('0'):
         v.append(gtin.lstrip('0'))
@@ -59,10 +64,9 @@ def _variations(gtin: str) -> list:
     return list(dict.fromkeys(v))
 
 
-# --- Validation queue ---
+# --- Validate queue ---
 
 def _queue_for_validation(record: dict) -> None:
-    """Append enriched record to validate.jsonl for human review."""
     try:
         os.makedirs(os.path.dirname(VALIDATE_JSONL), exist_ok=True)
         with open(VALIDATE_JSONL, 'a', encoding='utf-8') as f:
@@ -73,37 +77,16 @@ def _queue_for_validation(record: dict) -> None:
 
 # --- LLM enrichment ---
 
-def _build_enrichment_payload(record: dict) -> dict:
-    """Build Gemini API payload for clinical_profile enrichment."""
+def _build_payload(record: dict) -> dict:
     enrichment_schema = {
         "type": "OBJECT",
         "properties": {
-            "estimated_health_star": {
-                "type": "NUMBER",
-                "nullable": True,
-                "description": "Health Star Rating 0.5-5.0 in 0.5 increments. null if unable to estimate."
-            },
-            "fodmap_rating": {
-                "type": "INTEGER",
-                "description": "-1 Unknown, 0 None/Safe, 1 Low, 2 Medium/Portion-dependent, 3 High."
-            },
-            "coeliac_rating": {
-                "type": "INTEGER",
-                "description": "-1 Unknown, 0 Safe, 1 Cross-contamination risk, 2 Low-level, 3 High (Wheat/Rye/Barley)."
-            },
-            "histamine_rating": {
-                "type": "INTEGER",
-                "description": "-1 Unknown, 0 Safe/Fresh, 1 Low, 2 Moderate/Liberator, 3 High (Aged/Fermented/Cured)."
-            },
-            "allergen_warnings": {
-                "type": "ARRAY",
-                "items": {"type": "STRING"},
-                "description": "Top 8 allergens present. Empty array if none."
-            },
-            "health_summary": {
-                "type": "STRING",
-                "description": "1-2 sentence gut health summary based strictly on ingredients."
-            }
+            "estimated_health_star": {"type": "NUMBER",  "nullable": True},
+            "fodmap_rating":         {"type": "INTEGER"},
+            "coeliac_rating":        {"type": "INTEGER"},
+            "histamine_rating":      {"type": "INTEGER"},
+            "allergen_warnings":     {"type": "ARRAY", "items": {"type": "STRING"}},
+            "health_summary":        {"type": "STRING"},
         },
         "required": ["fodmap_rating", "coeliac_rating", "histamine_rating",
                      "allergen_warnings", "health_summary"]
@@ -131,19 +114,13 @@ def _build_enrichment_payload(record: dict) -> dict:
 
 
 def _call_gemini(record: dict) -> Optional[dict]:
-    """
-    Call Gemini API for clinical_profile enrichment.
-    Retries up to 8 times with exponential backoff + jitter.
-    Returns parsed clinical_profile dict or None on failure.
-    """
     if not _api_key:
         print("  [!] GEMINI_API_KEY not set")
         return None
 
-    url     = GEMINI_URL.format(api_key=_api_key)
-    payload = _build_enrichment_payload(record)
-    data    = json.dumps(payload).encode('utf-8')
-    req     = urllib.request.Request(
+    url  = GEMINI_URL.format(api_key=_api_key)
+    data = json.dumps(_build_payload(record)).encode('utf-8')
+    req  = urllib.request.Request(
         url, data=data,
         headers={'Content-Type': 'application/json'}
     )
@@ -176,7 +153,6 @@ def _call_gemini(record: dict) -> Optional[dict]:
 
 
 def _nop_profile() -> dict:
-    """Clinical profile for non-food items — no LLM needed."""
     return {
         "estimated_health_star": None,
         "fodmap_rating":         -1,
@@ -188,12 +164,6 @@ def _nop_profile() -> dict:
 
 
 def enrich(record: dict) -> dict:
-    """
-    Enrich a record with clinical_profile.
-    Non-food categories get NOP instantly.
-    Food items call Gemini.
-    Result is queued to validate.jsonl and returned.
-    """
     enriched = dict(record)
 
     if record.get("category") in NON_FOOD_CATEGORIES:
@@ -210,116 +180,100 @@ def enrich(record: dict) -> dict:
             enriched["clinical_profile"] = profile
             enriched["_enrichment_llm"]  = GEMINI_MODEL
         else:
-            # Enrichment failed — mark as attempted so we don't retry on every scan
             enriched["_enrichment_llm"]  = "FAILED"
 
     _queue_for_validation(enriched)
+
+    # Write enriched record back to DB
+    _off.save(enriched)
+
     return enriched
-
-
-# --- Unknown product analysis ---
-
-ANALYSIS_PROMPT = """
-You are a clinical dietary data extractor and food scientist.
-Analyse the following product label text and return a structured analysis.
-
-GTIN: {gtin}
-
-FRONT OF PACKAGE:
-{text_front}
-
-NUTRITION & INGREDIENTS PANEL:
-{text_nutrition}
-
-Extract:
-1. Product name and brand from the front label
-2. All ingredients as a clean list
-3. Nutrition per 100g where visible
-4. Clinical assessment: FODMAP, coeliac, histamine ratings, allergens, health summary
-
-Return JSON only. No markdown.
-"""
-
-def analyse_product(
-    gtin:           str,
-    text_front:     str,
-    text_nutrition: str,
-) -> Optional[dict]:
-    """
-    Analyse an unknown product from OCR text.
-    Returns an AnalysisResult-compatible dict or None on failure.
-    """
-    if not text_front and not text_nutrition:
-        return None
-
-    prompt = ANALYSIS_PROMPT.format(
-        gtin           = gtin,
-        text_front     = text_front or "(none)",
-        text_nutrition = text_nutrition or "(none)",
-    )
-
-    # Build a synthetic record to pass through enrichment
-    record = {
-        "gtin":            gtin,
-        "name":            "Unknown Product",
-        "raw_ingredients": text_nutrition,
-        "nutrition_100g":  None,
-        "_enrichment_llm": None,
-    }
-
-    profile_data = _call_gemini({"raw_ingredients": text_nutrition, "name": text_front[:80]})
-
-    if not profile_data:
-        return None
-
-    # Return in AnalysisResult shape expected by iOS
-    return {
-        "type":  "product",
-        "items": [{
-            "name":                text_front[:80] if text_front else gtin,
-            "safe":                profile_data.get("fodmap_rating", -1) <= 1,
-            "verdict":             _verdict(profile_data),
-            "summary":             profile_data.get("health_summary", ""),
-            "warnings":            profile_data.get("allergen_warnings", []),
-            "ingredients":         [i.strip() for i in text_nutrition.split(",") if i.strip()][:20],
-            "flaggedIngredients":  profile_data.get("allergen_warnings", []),
-            "detailedReason":      profile_data.get("health_summary", ""),
-        }]
-    }
-
-
-def _verdict(profile: dict) -> str:
-    ratings = [
-        profile.get("fodmap_rating", -1),
-        profile.get("coeliac_rating", -1),
-        profile.get("histamine_rating", -1),
-    ]
-    max_r = max(r for r in ratings if r >= 0) if any(r >= 0 for r in ratings) else -1
-    if max_r >= 3:   return "Avoid"
-    if max_r >= 2:   return "Caution"
-    if max_r >= 1:   return "Low Risk"
-    if max_r == 0:   return "Safe"
-    return "Unknown"
 
 
 # --- Main product lookup ---
 
 def get_product(scanned_gtin: str) -> Optional[dict]:
     """
-    Look up a product. Returns the record or None.
-
     Case 1: Enriched record  → return immediately
-    Case 2: Unenriched record → return record (caller streams enrichment separately)
-    Case 3: Not found        → return None
+    Case 2: Unenriched record → caller streams enrichment
+    Case 3: Not found         → return None
     """
+
+    # Debug: always return not found
+    if DEBUG_FORCE_NOT_FOUND:
+        print(f"  [DEBUG] DEBUG_FORCE_NOT_FOUND — returning None for {scanned_gtin}")
+        return None
+
     for candidate in _variations(scanned_gtin):
         record = _off.get(candidate)
         if record:
+            # Debug: strip enrichment to simulate Case 2
+            if DEBUG_FORCE_UNENRICHED:
+                print(f"  [DEBUG] DEBUG_FORCE_UNENRICHED — stripping enrichment for {candidate}")
+                record = dict(record)
+                record["_enrichment_llm"] = None
+                record["clinical_profile"] = None
             return record
 
     return None
 
 
 def is_enriched(record: dict) -> bool:
-    """True if this record has already been through LLM enrichment."""
     return bool(record.get("_enrichment_llm"))
+
+
+# --- OCR product analysis ---
+
+def analyse_product(
+    gtin:           str,
+    text_front:     str,
+    text_nutrition: str,
+) -> Optional[dict]:
+    if not text_front and not text_nutrition:
+        return None
+
+    record = {
+        "gtin":            gtin,
+        "name":            text_front[:80],
+        "raw_ingredients": text_nutrition,
+        "nutrition_100g":  None,
+        "_enrichment_llm": None,
+    }
+
+    profile = _call_gemini(record)
+    if not profile:
+        return None
+
+    return {
+        "type":  "product",
+        "items": [{
+            "name":               text_front[:80] if text_front else gtin,
+            "safe":               profile.get("fodmap_rating", -1) <= 1,
+            "verdict":            _verdict(profile),
+            "summary":            profile.get("health_summary", ""),
+            "warnings":           profile.get("allergen_warnings", []),
+            "ingredients":        _parse_ingredients(text_nutrition),
+            "flaggedIngredients": profile.get("allergen_warnings", []),
+            "detailedReason":     profile.get("health_summary", ""),
+        }]
+    }
+
+
+def _parse_ingredients(text: str) -> list:
+    """Strip leading label then split on comma, trimming whitespace."""
+    text = re.sub(r'^\s*Ingredients?\s*:\s*', '', text, flags=re.IGNORECASE)
+    return [i.strip() for i in text.split(',') if i.strip()]
+
+
+def _verdict(profile: dict) -> str:
+    ratings = [
+        profile.get("fodmap_rating",    -1),
+        profile.get("coeliac_rating",   -1),
+        profile.get("histamine_rating", -1),
+    ]
+    max_r = max((r for r in ratings if r >= 0), default=-1)
+    if max_r >= 3: return "Avoid"
+    if max_r >= 2: return "Caution"
+    if max_r >= 1: return "Low Risk"
+    if max_r == 0: return "Safe"
+    return "Unknown"

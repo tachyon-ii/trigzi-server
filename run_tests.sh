@@ -1,47 +1,51 @@
 #!/bin/bash
 # run_tests.sh
-# Runs the full LLM layer test suite.
-# Run from your Flask project root.
+# Runs the full test suite.
+# Run from the project root.
 
 set -e
 
-echo "🧪 Running LLM layer tests..."
-echo ""
+ENV_FILE=/etc/trigzi/env
+if [ -z "$DB_USER" ] && [ -f "$ENV_FILE" ]; then
+    set -a; . "$ENV_FILE"; set +a
+fi
 
-# Ensure we're running from the project root
-if [ ! -d "core/llm" ]; then
-    echo "❌ Must be run from the project root (core/llm not found)"
+if [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
+elif [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
+fi
+
+if [ ! -d "tests" ]; then
+    echo "ERROR: Must be run from the project root (tests/ not found)"
     exit 1
 fi
 
-# Activate virtualenv if present
-if [ -f ".venv/bin/activate" ]; then
-    source .venv/bin/activate
-elif [ -f "venv/bin/activate" ]; then
-    source venv/bin/activate
-fi
+echo "Running test suite..."
+echo ""
 
-# Run each test module individually for clear output,
-# then summarise with the combined runner
+echo "── gtin ────────────────────────────────────────────"
+python -m pytest tests/test_gtin.py -v
 
+echo ""
 echo "── errors ──────────────────────────────────────────"
-python -m pytest test/test_errors.py -v
+python -m pytest tests/test_errors.py -v
 
 echo ""
 echo "── config ──────────────────────────────────────────"
-python -m pytest test/test_config.py -v
+python -m pytest tests/test_config.py -v
 
 echo ""
 echo "── filters ─────────────────────────────────────────"
-python -m pytest test/test_filters.py -v
+python -m pytest tests/test_filters.py -v
 
 echo ""
 echo "── router ──────────────────────────────────────────"
-python -m pytest test/test_router.py -v
+python -m pytest tests/test_router.py -v
 
 echo ""
 echo "── full suite ──────────────────────────────────────"
-python -m pytest test/ -v --tb=short --asyncio-mode=auto
+python -m pytest tests/ -v --tb=short --asyncio-mode=auto
 
 echo ""
-echo "✅ Done."
+echo "Done."

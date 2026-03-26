@@ -1,0 +1,32 @@
+Extract product information from the OCR label text below.
+Return ONLY these fields, one per line, in exactly this format.
+Numbers only for numeric fields (no units). Blank if unknown.
+
+name: <product name>
+brand: <brand name>
+ingredients: <comma separated list, no leading label>
+energy_kj: <number per 100ml/100g>
+calories_kcal: <number per 100ml/100g>
+protein_g: <number per 100ml/100g>
+fat_total_g: <number per 100ml/100g>
+fat_saturated_g: <number per 100ml/100g>
+carbohydrates_g: <number per 100ml/100g>
+sugars_g: <number per 100ml/100g>
+fibre_g: <number per 100ml/100g>
+sodium_mg: <number per 100ml/100g>
+fodmap: <-1 unknown, 0 none, 1 low, 2 medium, 3 high>
+coeliac: <-1 unknown, 0 safe, 1 cross-contamination risk, 2 low level, 3 high>
+histamine: <-1 unknown, 0 safe, 1 low, 2 moderate, 3 high>
+allergens: <comma separated list or blank>
+summary: <one sentence gut health summary based strictly on ingredients>
+
+Rules:
+- Use per 100ml or per 100g values, not per serving
+- Strip any leading label from ingredients (e.g. "INGREDIENTS:", "Contains:")
+- Return exactly these 17 fields, no extras, no JSON, no markdown, no explanation
+
+FRONT LABEL:
+{text_front}
+
+NUTRITION & INGREDIENTS PANEL:
+{text_nutrition}
