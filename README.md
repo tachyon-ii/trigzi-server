@@ -1,111 +1,269 @@
-# Edge-to-Cloud Product API
+# Trigzi — Backend API
 
-A stateless, N-Tier Flask backend designed to ingest raw retailer barcode data, normalize it into a strict domain model, and serve it to a mobile iOS client.
+Dietary safety intelligence platform. Scans barcodes, looks up product data, enriches with clinical profiles (FODMAP, coeliac, histamine, allergens), and serves results to the iOS app via a Flask API.
 
-## Architecture Overview
+**North star: less death.**
 
-This system uses an Extract, Load, Transform (ELT) pipeline to ensure the client application is completely decoupled from external retailer APIs (like Woolworths or Coles).
+---
 
-* **L0 Cache (Raw):** Stores the unmodified vendor JSON dump for auditing and future-proofing.
-* **L1 Cache (Normalized):** A strictly typed, mathematically-ready JSON schema served to the mobile client.
-* **Symlink Aliasing:** Automatically generates zero-byte symlinks for UPC-A / EAN-13 barcode variations (e.g., stripping or padding leading zeros) to guarantee O(1) cache hits on subsequent scans regardless of how the iOS camera interprets the barcode.
-
-## Directory Taxonomy
-
-```text
-backend/
-├── app.py                     # API Router and HTTP validation
-├── core/
-│   ├── data_manager.py        # ELT Orchestrator (Fetch -> Save L0 -> Normalize -> Save L1)
-│   └── storage_manager.py     # Centralized I/O and sharded directory manager
-├── providers/
-│   ├── woolworths/            # Stateless provider tier
-│   │   ├── client.py          # HTTP requests to vendor API
-│   │   └── formatter.py       # Maps vendor JSON to the strict L1 schema
-│   └── barcodelookup/         # (Future fallback provider)
-├── utils/
-│   └── ingredient_parser.py   # Recursive AST parser for nested ingredient brackets
-└── data/                      # Sharded local cache (chown to Gunicorn user)
-    ├── raw/                   # L0 Cache (e.g., raw/woolworths/451/9319133333451.json)
-    └── normalized/            # L1 Cache (e.g., normalized/451/9319133333451.json)
+## Architecture
 
 ```
+iOS App (scanner)
+    │
+    ▼
+nginx (trigzi.com:443)
+    │
+    ▼
+Gunicorn / Flask (127.0.0.1:5000)
+    │
+    ├── core/data_manager.py   — product lookup + LLM enrichment
+    ├── core/telemetry.py      — scan logging + unmatched GTIN queue
+    ├── core/db.py             — MariaDB connection pool
+    └── core/llm/              — LLM abstraction layer (Gemini, Claude, OpenAI)
+```
 
-## The L1 Domain Model (`normalized_form`)
+---
 
-The API guarantees this exact structure for all successful queries, regardless of the underlying data provider. Macros are converted to pure floats, and ingredients form a recursive Abstract Syntax Tree (AST).
+## Product Data Waterfall
+
+```
+A. MariaDB products table
+   ├── enriched (clinical_profile set)  → return immediately
+   └── unenriched                       → enrich via Gemini → return + queue for validation
+
+B. Not found → 404 → iOS offers dual-camera capture
+   └── OCR both images on device → POST to /api/v1/analyse/product → LLM analysis
+```
+
+---
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`  | `/api/v1/product/<gtin>` | Product lookup. Returns JSON (enriched) or SSE stream (enriching) |
+| `POST` | `/api/v1/analyse/product` | Unknown product analysis from OCR text |
+| `POST` | `/api/v1/telemetry/unmatched/gtin` | Log unmatched GTIN for acquisition queue |
+
+### SSE Response (unenriched product)
+
+```
+event: partial
+data: {"status": "partial", "product": {...}}
+
+event: enriched
+data: {"status": "complete", "product": {...}}
+```
+
+---
+
+## Database
+
+MariaDB `trigzi` database on localhost.
+
+```sql
+products (
+    gtin          VARCHAR(13)  PRIMARY KEY,   -- normalised EAN-13
+    source        VARCHAR(20),                -- 'off', 'woolworths', 'coles', 'ocr'
+    name          VARCHAR(150),               -- denormalised for search
+    enrichment_id INT → enrichments.id,       -- null = not yet enriched
+    data          JSON,                       -- full unified product schema
+    updated_at    TIMESTAMP
+)
+
+enrichments (
+    id          INT PRIMARY KEY,
+    task        VARCHAR(50),    -- 'product', 'ocr_analysis'
+    llm_model   VARCHAR(100),   -- 'gemini-2.5-flash'
+    prompt_ver  VARCHAR(20),    -- 'extract_v2'
+    prompt_hash CHAR(8),        -- SHA256[:8] of prompt text
+    prompt_text MEDIUMTEXT      -- full prompt for exact reproduction
+)
+```
+
+### Data Sources
+
+| Source | Records | Notes |
+|--------|---------|-------|
+| Open Food Facts | ~2.2M | Global products, quality-filtered (no error tags) |
+| Woolworths | ~48k | AU products, LLM-enriched |
+| Coles | — | Pipeline ready |
+
+### GTIN Normalisation
+
+All GTINs normalised to EAN-13 via `utils/gtin.normalise()`:
+
+- `< 13 digits` → zero-pad to 13
+- `14 digits, leading 0` → strip leading digit → 13
+- `14 digits, non-zero leader` → drop (EAN-14, non-consumer)
+- `> 14 digits` → drop (invalid)
+
+---
+
+## Project Structure
+
+```
+app.py                  Flask application + routes
+deploy.sh               Bounce gunicorn + nginx
+run_tests.sh            Full test suite
+
+core/
+    data_manager.py     Product lookup, enrichment, OCR analysis
+    db.py               MariaDB connection pool (DBUtils)
+    telemetry.py        Scan logging + telemetry routes (Blueprint)
+    llm/                LLM abstraction layer
+        config.py       Provider config from llm_providers.json
+        router.py       direct / race / failover / cost modes
+        providers/      Gemini, Claude, OpenAI adapters
+        probe.py        Live connectivity checker
+
+utils/
+    gtin.py             GTIN normalisation (OFF spec)
+    off_lookup.py       MariaDB product lookup
+    category_mapper.py  Woolworths/Coles → canonical category
+    ingredient_parser.py Ingredient string tokeniser
+    nutrition.py        Nutrition data normalisation
+    tree.py             Clean project tree (excludes venv/__pycache__)
+
+scripts/
+    import_off_to_db.py     Import raw OFF JSONL → MariaDB
+    import_enriched.py      Import enriched Woolworths/Coles JSONL → MariaDB
+    normalise_enriched_gtins.py  Normalise GTINs in enriched JSONL
+    off_profiler.py         Profile OFF JSONL schema (field coverage/types)
+    llm_push.py             Stage 1: send scan file to LLM, save raw response
+    llm_pull.py             Stage 2: parse LLM response → validate → schema
+    probe_live.py           Live LLM provider connectivity check
+    run_import.sh           nohup wrapper for import scripts
+
+prompts/
+    extract_v1.txt      Initial extraction prompt
+    extract_v2.txt      + FODMAP reference table, serving/package fields
+
+tests/
+    test_gtin.py        GTIN normalisation (22 tests)
+    test_errors.py      LLM error types
+    test_config.py      LLM provider config
+    test_filters.py     Request/response filters
+    test_router.py      LLM routing modes
+    test_probe.py       Provider probe
+
+logs/
+    import_off.log      OFF import progress
+    scans/              Raw scan inputs (*_ocr.txt, *_enrich.txt)
+    llm_responses/      Raw LLM responses for prompt iteration
+    unmatched.log       Unmatched GTINs (product acquisition queue)
+```
+
+---
+
+## Product Schema
 
 ```json
 {
-  "status": "success",
-  "gtin": "9319133333451",
-  "product_data": {
-    "name": "Carman's Muesli Toasted Super Berry...",
-    "brand": "Carman's",
-    "health_star_rating": 4.0,
-    "allergens": {
-      "contains": ["sesame", "gluten", "almond", "pecan"],
-      "may_be_present": ["milk", "tree nuts", "peanuts", "soy", "lupin", "wheat"]
-    },
-    "ingredients": [
-      {
-        "name": "Fruit",
-        "percentage": 10.0,
-        "sub_ingredients": [
-          { "name": "Blueberries", "percentage": 1.0, "sub_ingredients": null, "raw": "Blueberries" }
-        ],
-        "raw": "Fruit 10% (Blueberries 1%)"
-      }
-    ],
-    "macros_100g": {
-      "calories_kcal": 449.3,
-      "energy_kj": 1880.0,
-      "protein_g": 10.6,
-      "fat_total_g": 20.5,
-      "carbohydrates_g": 51.1,
-      "sugars_g": 12.6,
-      "sodium_mg": 15.0
-    },
-    "source": "Woolworths"
+  "gtin": "0070177161170",
+  "source": "off",
+  "brand": "Twinings",
+  "name": "Chai",
+  "image_url": "https://images.openfoodfacts.org/...",
+  "package_size": "20 bags",
+  "category": "Tea Bags",
+  "subcategory": "",
+  "health_star_rating": 4.5,
+  "serving_size_g": 1.5,
+  "servings_per_pack": 20,
+  "nutrition_100g": {
+    "energy_kj": 145.0,
+    "calories_kcal": 34.0,
+    "protein_g": 3.2,
+    "fat_total_g": 0.1,
+    "fat_saturated_g": 0.1,
+    "carbohydrates_g": 4.9,
+    "sugars_g": 4.9,
+    "fibre_g": null,
+    "sodium_mg": 45.0
   },
-  "conversation": "Looks like you scanned Carman's Muesli..."
+  "raw_ingredients": "Black Tea, Vanilla Flavour...",
+  "parsed_ingredients": ["black tea", "vanilla flavour"],
+  "clinical_profile": {
+    "estimated_health_star": 4.5,
+    "fodmap_rating": 1,
+    "coeliac_rating": 0,
+    "histamine_rating": 2,
+    "allergen_warnings": [],
+    "health_summary": "Contains anti-inflammatory spices..."
+  },
+  "_source_id": "0070177161170",
+  "_source_name": "off",
+  "_enrichment_llm": "gemini-2.5-flash"
 }
-
 ```
 
-## Setup & Deployment
+---
 
-1. **Install Dependencies:**
+## Prompt Development
+
+LLM extraction uses a two-stage pipeline decoupled for iteration:
+
 ```bash
-pip install flask curl_cffi
+# Stage 1: send scan file to LLM, save raw response
+./scripts/llm_push.py logs/scans/1774500621_9310077217814_ocr.txt \
+    --prompt prompts/extract_v2.txt
 
+# Stage 2: parse response → validate → schema (repeat without hitting LLM)
+./scripts/llm_pull.py logs/llm_responses/1774511242_9310077217814.txt
 ```
 
+Scan files in `logs/scans/` are the regression test corpus.
 
-2. **Initialize Data Directories:**
-The application requires a `data/` directory at the project root. If running via Gunicorn or Systemd, the background user must have explicit write permissions.
+---
+
+## Operations
+
 ```bash
-mkdir -p data/raw data/normalized
-sudo chown -R your_web_user:your_web_group data/
-sudo chmod -R 755 data/
+# Bounce services
+./deploy.sh
 
+# Run tests
+./run_tests.sh
+
+# Check LLM provider health
+./scripts/probe_live.py all
+
+# Product acquisition queue (sort by frequency)
+sort logs/unmatched.log | uniq -c | sort -rn | head -50
+
+# Import OFF data
+./scripts/run_import.sh scripts/import_off_to_db.py \
+    --input /data2000/openfoodfacts-products.jsonl --write
+
+# Import enriched Woolworths/Coles
+./scripts/run_import.sh scripts/import_enriched.py \
+    --input /data2000/enriched_products_normalised.jsonl --write
 ```
 
+---
 
-3. **Run Server:**
+## Environment
+
+Variables in `/etc/trigzi/env` (loaded by systemd and scripts):
+
 ```bash
-gunicorn -w 4 -b 127.0.0.1:5000 app:app
-
+DB_HOST=localhost
+DB_NAME=trigzi
+DB_USER=trigzi
+DB_PASS=...
+GEMINI_API_KEY=...
 ```
 
+---
 
+## iOS App
 
-## API Usage
+The iOS companion app (`scanner`) is a SwiftUI application handling:
 
-**Endpoint:** `GET /api/v1/product/<gtin>`
-
-* **200 OK:** Returns the `normalized_form` JSON.
-* **400 Bad Request:** If the GTIN fails numeric or length validation (8-14 digits).
-* **404 Not Found:** If the product cannot be located in the local cache or upstream providers.
-
-*** Would you like me to add anything specific about the iOS SwiftData requirements to the README, or are we ready to jump back into Xcode?
+- Barcode scanning → GTIN lookup via this API
+- SSE streaming for live enrichment updates
+- Dual-camera capture for unknown products (front label + nutrition panel)
+- On-device Vision OCR → POST to `/api/v1/analyse/product`
+- `ProductNotFoundView` → `DualCaptureView` → `DiagnosticView` → `MealAnalysisView`

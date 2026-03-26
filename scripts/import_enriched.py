@@ -41,10 +41,16 @@ BULK_START = [
     "SET unique_checks = 0",
     "SET foreign_key_checks = 0",
     "SET autocommit = 0",
+    "DROP INDEX idx_name    ON products",
+    "DROP INDEX idx_source  ON products",
+    "DROP INDEX idx_updated ON products",
 ]
 
 BULK_END = [
     "COMMIT",
+    "CREATE INDEX idx_name    ON products (name)",
+    "CREATE INDEX idx_source  ON products (source)",
+    "CREATE INDEX idx_updated ON products (updated_at)",
     "SET unique_checks = 1",
     "SET foreign_key_checks = 1",
     "SET autocommit = 1",
