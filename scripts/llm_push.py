@@ -1,36 +1,35 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-"""
-scripts/llm_push.py
-
-Stage 1: Send a scan file to the LLM and write the raw response.
-
-The raw response is saved to logs/llm_responses/<timestamp>_<gtin>.txt
-for processing by llm_pull.py (Stage 2).
-
-Usage:
-    ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt
-    ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt --prompt prompts/v2.txt
-"""
+#
+#  scripts/llm_push.py
+#
+#  Stage 1: Send a scan file to the LLM router and write the raw response.
+#
+#  Routes through core/llm/router.py for provider failover.
+#  Provider is selected by --provider (default: gemini).
+#
+#  The raw response is saved to logs/llm_responses/<timestamp>_<gtin>.txt
+#  for processing by llm_pull.py (Stage 2).
+#
+#  Usage:
+#      ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt
+#      ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt --prompt prompts/extract_v2.txt
+#      ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt --provider claude
+#
 
 import os
 import sys
 import time
 import json
-import urllib.request
-import urllib.error
+import asyncio
 import argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-RESPONSES_DIR = os.path.join(os.path.dirname(__file__), '..', 'logs', 'llm_responses')
-DEFAULT_PROMPT = os.path.join(os.path.dirname(__file__), '..', 'prompts', 'extract_v1.txt')
+from core.llm.router import router
 
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_URL   = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent?key={{api_key}}"
-)
+RESPONSES_DIR  = os.path.join(os.path.dirname(__file__), '..', 'logs', 'llm_responses')
+DEFAULT_PROMPT = os.path.join(os.path.dirname(__file__), '..', 'prompts', 'extract_v1.txt')
 
 
 def load_scan(path: str) -> dict:
@@ -39,24 +38,16 @@ def load_scan(path: str) -> dict:
         content = f.read()
 
     parts = {}
-    lines = content.split('\n')
-
-    # Extract header fields
-    for line in lines:
+    for line in content.split('\n'):
         for key in ('GTIN', 'TIMESTAMP', 'SOURCE'):
             if line.startswith(f'{key}:'):
                 parts[key.lower()] = line.split(':', 1)[1].strip()
 
-    # Extract sections
     for section in ('FRONT OF PACKAGE', 'NUTRITION & INGREDIENTS', 'INGREDIENTS'):
         marker = f'=== {section} ==='
         if marker in content:
             after = content.split(marker, 1)[1]
-            # Take until next section or end
-            if '===' in after:
-                text = after.split('===', 1)[0]
-            else:
-                text = after
+            text  = after.split('===', 1)[0] if '===' in after else after
             parts[section.lower().replace(' ', '_').replace('&_', '')] = text.strip()
 
     return parts
@@ -67,55 +58,46 @@ def load_prompt(path: str) -> str:
         return f.read()
 
 
-def call_gemini(prompt: str, api_key: str) -> str:
-    """Call Gemini with a plain text prompt, return raw text response."""
-    url     = GEMINI_URL.format(api_key=api_key)
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.1,
-        }
-    }
-    data = json.dumps(payload).encode('utf-8')
-    req  = urllib.request.Request(
-        url, data=data,
-        headers={'Content-Type': 'application/json'}
+async def call_router(prompt: str, provider: str, timeout: float) -> tuple[str, str]:
+    """Call the LLM router. Returns (response_text, model_used)."""
+    response = await router.analyze(
+        payload       = {"prompt": prompt},
+        profile       = "",
+        model_strings = [provider],
+        optimize      = "accuracy",
+        timeout       = timeout,
     )
+    result = response.get("result", {})
+    model  = response.get("model", provider)
 
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = json.loads(resp.read().decode('utf-8'))
-        return (body
-                .get('candidates', [{}])[0]
-                .get('content', {})
-                .get('parts', [{}])[0]
-                .get('text', ''))
+    # result may be a dict (JSON) or a raw string depending on provider
+    if isinstance(result, dict):
+        text = json.dumps(result, ensure_ascii=False, indent=2)
+    else:
+        text = str(result)
+
+    return text, model
 
 
-def run(scan_path: str, prompt_path: str) -> str:
-    api_key = os.environ.get('GEMINI_API_KEY', '')
-    if not api_key:
-        print("ERROR: GEMINI_API_KEY not set")
-        sys.exit(1)
+def run(scan_path: str, prompt_path: str, provider: str, timeout: float) -> str:
+    print(f"Scan     : {scan_path}")
+    print(f"Prompt   : {prompt_path}")
+    print(f"Provider : {provider}")
 
-    print(f"Scan   : {scan_path}")
-    print(f"Prompt : {prompt_path}")
-
-    scan   = load_scan(scan_path)
+    scan            = load_scan(scan_path)
     prompt_template = load_prompt(prompt_path)
 
-    # Build the full prompt
     prompt = prompt_template.format(
         text_front     = scan.get('front_of_package', ''),
         text_nutrition = scan.get('nutrition_ingredients', '') or scan.get('ingredients', ''),
     )
 
-    print(f"Calling {GEMINI_MODEL}...")
-    t0       = time.time()
-    response = call_gemini(prompt, api_key)
-    elapsed  = time.time() - t0
-    print(f"Response in {elapsed:.1f}s ({len(response)} chars)")
+    print(f"Calling router ({provider})...")
+    t0               = time.time()
+    text, model_used = asyncio.run(call_router(prompt, provider, timeout))
+    elapsed          = time.time() - t0
+    print(f"Response in {elapsed:.1f}s ({len(text)} chars) via {model_used}")
 
-    # Save raw response
     os.makedirs(RESPONSES_DIR, exist_ok=True)
     gtin     = scan.get('gtin', 'unknown')
     out_file = os.path.join(RESPONSES_DIR, f"{int(time.time())}_{gtin}.txt")
@@ -123,25 +105,31 @@ def run(scan_path: str, prompt_path: str) -> str:
     with open(out_file, 'w', encoding='utf-8') as f:
         f.write(f"# SCAN: {scan_path}\n")
         f.write(f"# PROMPT: {prompt_path}\n")
-        f.write(f"# MODEL: {GEMINI_MODEL}\n")
+        f.write(f"# MODEL: {model_used}\n")
         f.write(f"# ELAPSED: {elapsed:.1f}s\n")
         f.write(f"# GTIN: {gtin}\n")
         f.write(f"#\n")
-        f.write(response)
+        f.write(text)
 
     print(f"Saved  : {out_file}")
     print()
     print("--- RAW RESPONSE ---")
-    print(response)
+    print(text)
     return out_file
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Stage 1: Send scan file to LLM, save raw response."
+        description="Stage 1: Send scan file to LLM router, save raw response."
     )
-    parser.add_argument('scan', help="Path to scan file (logs/scans/*.txt)")
+    parser.add_argument('scan',
+        help="Path to scan file (logs/scans/*.txt)")
     parser.add_argument('--prompt', default=DEFAULT_PROMPT,
-                        help=f"Prompt template (default: {DEFAULT_PROMPT})")
+        help=f"Prompt template (default: extract_v1.txt)")
+    parser.add_argument('--provider', default='gemini',
+        choices=['gemini', 'claude', 'openai'],
+        help="LLM provider (default: gemini)")
+    parser.add_argument('--timeout', type=float, default=60.0,
+        help="Request timeout in seconds (default: 60)")
     args = parser.parse_args()
-    run(args.scan, args.prompt)
+    run(args.scan, args.prompt, args.provider, args.timeout)

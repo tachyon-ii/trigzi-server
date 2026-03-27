@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-"""
-scripts/llm_pull.py
-
-Stage 2: Parse a raw LLM response file → validate → pretty print.
-
-Can be run repeatedly against the same response file to iterate
-the parser without re-calling the LLM. Response files are the
-regression test corpus.
-
-Usage:
-    ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt
-    ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt --strict
-    ./scripts/llm_pull.py logs/llm_responses/*.txt   # batch
-"""
+#
+#  scripts/llm_pull.py
+#
+#  Stage 2: Parse a raw LLM response file -> validate -> pretty print.
+#
+#  Can be run repeatedly against the same response file to iterate
+#  the parser without re-calling the LLM. Response files are the
+#  regression test corpus. Works with responses from any provider --
+#  model is read from the # MODEL: header written by llm_push.py.
+#
+#  Usage:
+#      ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt
+#      ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt --strict
+#      ./scripts/llm_pull.py logs/llm_responses/*.txt   # batch
+#
 
 import os
 import sys
@@ -52,18 +53,30 @@ FIELDS = [
 FIELD_NAMES = {f[0] for f in FIELDS}
 
 
+def parse_header(text: str) -> dict:
+    """Extract # KEY: value header lines written by llm_push.py."""
+    meta = {}
+    for line in text.split('\n'):
+        if not line.startswith('#'):
+            break
+        if ':' in line:
+            key, _, val = line[1:].partition(':')
+            meta[key.strip().lower()] = val.strip()
+    return meta
+
+
 def parse_response(text: str) -> tuple[dict, list[str]]:
     """
     Parse key: value lines from LLM response.
+    Skips comment header lines (start with #).
     Returns (parsed_dict, list_of_warnings).
     """
     parsed   = {}
     warnings = []
 
-    # Strip comment header lines (start with #)
-    lines = [l for l in text.split('\n') if not l.startswith('#')]
-
-    for line in lines:
+    for line in text.split('\n'):
+        if line.startswith('#'):
+            continue
         line = line.strip()
         if not line:
             continue
@@ -106,9 +119,8 @@ def coerce(parsed: dict) -> tuple[dict, list[str]]:
             if typ == float:
                 result[key] = float(raw)
             elif typ == int:
-                result[key] = int(float(raw))  # handle "2.0"
+                result[key] = int(float(raw))
             elif typ == list:
-                # Strip leading label (e.g. "Ingredients: ...")
                 raw = re.sub(r'^\s*\w[\w\s]*:\s*', '', raw, count=1)
                 result[key] = [i.strip() for i in raw.split(',') if i.strip()]
             else:
@@ -120,7 +132,7 @@ def coerce(parsed: dict) -> tuple[dict, list[str]]:
     return result, errors
 
 
-def to_schema(coerced: dict, gtin: str) -> dict:
+def to_schema(coerced: dict, gtin: str, model: str) -> dict:
     """Map parsed fields to unified product schema."""
     return {
         "gtin":             gtin,
@@ -157,7 +169,7 @@ def to_schema(coerced: dict, gtin: str) -> dict:
         },
         "_source_id":      gtin,
         "_source_name":    "ocr",
-        "_enrichment_llm": "ocr_pipeline",
+        "_enrichment_llm": model or "ocr_pipeline",
     }
 
 
@@ -170,11 +182,13 @@ def process_file(path: str, strict: bool) -> bool:
     with open(path, 'r', encoding='utf-8') as f:
         text = f.read()
 
-    # Extract GTIN from header
-    gtin_match = re.search(r'^# GTIN: (.+)$', text, re.MULTILINE)
-    gtin = gtin_match.group(1).strip() if gtin_match else 'unknown'
+    meta  = parse_header(text)
+    gtin  = meta.get('gtin', 'unknown')
+    model = meta.get('model', 'unknown')
 
-    # Parse
+    print(f"GTIN  : {gtin}")
+    print(f"MODEL : {model}")
+
     parsed, warnings = parse_response(text)
 
     if warnings:
@@ -182,18 +196,16 @@ def process_file(path: str, strict: bool) -> bool:
         for w in warnings:
             print(f"  ! {w}")
 
-    # Coerce
     coerced, errors = coerce(parsed)
 
     if errors:
         print(f"\nCOERCE ERRORS ({len(errors)}):")
         for e in errors:
-            print(f"  ✗ {e}")
+            print(f"  x {e}")
         if strict:
             return False
 
-    # Map to schema
-    schema = to_schema(coerced, gtin)
+    schema = to_schema(coerced, gtin, model)
 
     print(f"\nSCHEMA OUTPUT:")
     print(json.dumps(schema, indent=2, ensure_ascii=False))
@@ -205,12 +217,12 @@ def process_file(path: str, strict: bool) -> bool:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Stage 2: Parse LLM response → validate → pretty print."
+        description="Stage 2: Parse LLM response -> validate -> pretty print."
     )
     parser.add_argument('files', nargs='+',
-                        help="Response file(s) from llm_push.py")
+        help="Response file(s) from llm_push.py")
     parser.add_argument('--strict', action='store_true',
-                        help="Exit non-zero if any errors found")
+        help="Exit non-zero if any errors found")
     args = parser.parse_args()
 
     results = []

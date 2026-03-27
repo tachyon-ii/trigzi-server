@@ -44,6 +44,18 @@ echo "── router ────────────────────
 python -m pytest tests/test_router.py -v
 
 echo ""
+echo "── off_lookup ──────────────────────────────────────"
+python -m pytest tests/test_off_lookup.py -v
+
+echo ""
+echo "── analyser ────────────────────────────────────────"
+python -m pytest tests/test_analyser.py -v --asyncio-mode=auto
+
+echo ""
+echo "── enricher ────────────────────────────────────────"
+python -m pytest tests/test_enricher.py -v --asyncio-mode=auto
+
+echo ""
 echo "── full suite ──────────────────────────────────────"
 python -m pytest tests/ -v --tb=short --asyncio-mode=auto
 
