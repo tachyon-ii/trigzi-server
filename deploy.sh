@@ -1,16 +1,20 @@
 #!/bin/bash
 
+ERRORS=0
+
 # 1. Check environment is loaded
 if [ -z "$DB_USER" ]; then
-    echo "ERROR: Environment not loaded."
-    echo "Please run: source /etc/trigzi/env"
-    exit 1
+    echo "ERROR: Environment not loaded. Run: source /etc/trigzi/env"
+    ERRORS=$((ERRORS + 1))
 fi
 
 # 2. Check virtualenv is active
 if [ -z "$VIRTUAL_ENV" ]; then
-    echo "ERROR: Virtual environment is not active."
-    echo "Please run: source venv/bin/activate"
+    echo "ERROR: Virtual environment not active. Run: source venv/bin/activate"
+    ERRORS=$((ERRORS + 1))
+fi
+
+if [ $ERRORS -gt 0 ]; then
     exit 1
 fi
 

@@ -1,55 +1,100 @@
-# Trigzi Server Architecture & Deployment Guide
+# Trigzi Server Setup & Deployment Guide
 
-This document outlines the provisioning and deployment pipeline for the Trigzi backend. The architecture utilizes a standard reverse-proxy pattern: **NGINX** handles SSL termination and static asset delivery, forwarding dynamic API requests to **Gunicorn**, which manages the **Flask** application workers running inside an isolated Python virtual environment.
+Architecture: **nginx** handles SSL termination and static assets, forwarding `/api/` to **Gunicorn** which manages **Flask** workers inside a Python virtual environment on RHEL/CentOS.
+
+---
 
 ## Prerequisites
-* A Debian/Ubuntu-based Linux server.
-* DNS A-records for `trigzi.com` and `www.trigzi.com` pointing to the server's public IP.
-* Root or `sudo` privileges.
+
+- RHEL / CentOS / Rocky Linux server
+- DNS A-records for `trigzi.com` and `www.trigzi.com` pointing to server IP
+- Root or sudo privileges
 
 ---
 
 ## 1. System Dependencies
-Install the required system-level packages. 
 
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install python3 python3-venv python3-pip nginx certbot python3-certbot-nginx -y
+dnf install python3 python3-pip nginx certbot python3-certbot-nginx mysql-server -y
 ```
 
-## 2. Directory Structure & Permissions
-We deploy to `/var/www/` as it is the Unix standard for web-facing applications.
+---
+
+## 2. Directory Structure
 
 ```bash
-# Create the root application directory
-sudo mkdir -p /var/www/trigzi
-sudo chown -R $USER:www-data /var/www/trigzi
-sudo chmod -R 775 /var/www/trigzi
+mkdir -p /var/www/trigzi
+chown -R root:nginx /var/www/trigzi
+chmod -R 775 /var/www/trigzi
 cd /var/www/trigzi
 ```
-*Architecture Note: We assign group ownership to `www-data` so NGINX can natively read the static frontend files in the `/html` directory without requiring elevated privileges.*
+
+---
 
 ## 3. Python Virtual Environment
-Python virtual environments hardcode absolute paths into their binaries (like `pip` and `gunicorn`). **Never move or rename a `venv` directory.** If the project moves, nuke the environment and rebuild it.
+
+Python venvs hardcode absolute paths — never move or rename the `venv` directory. If the project moves, delete and rebuild.
 
 ```bash
-# Build the pristine environment
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies (Flask, gunicorn, requests, curl_cffi)
 pip install -r requirements.txt
 ```
 
-## 4. Gunicorn & Systemd Application Server
-We use `systemd` to keep the Python application alive, restart it on crashes, and manage its boot sequence.
+---
 
-Create the service file:
+## 4. Environment Configuration
+
+All secrets and config live in `/etc/trigzi/env`. This file is loaded by systemd and by root's shell.
+
 ```bash
-sudo vi /etc/systemd/system/trigzi_api.service
+mkdir -p /etc/trigzi
+cat > /etc/trigzi/env << 'EOF'
+export DB_HOST=localhost
+export DB_NAME=trigzi
+export DB_USER=trigzi
+export DB_PASS=<password>
+export GEMINI_API_KEY=<key>
+export CLAUDE_API_KEY=<key>
+export OPENAI_API_KEY=<key>
+EOF
+chmod 600 /etc/trigzi/env
 ```
 
-Paste the following configuration:
+Add to `/root/.bashrc` so every `sudo su root` session is fully configured:
+
+```bash
+trigzi() {
+    source /etc/trigzi/env
+    source /var/www/trigzi/venv/bin/activate
+    cd /var/www/trigzi
+    echo "OK: trigzi environment loaded"
+}
+```
+
+---
+
+## 5. Database
+
+```bash
+# Create database and products table
+./setup/createdb trigzi <password>
+
+# Import Open Food Facts data
+./scripts/run_import.sh scripts/import_off_to_db.py \
+    --input /data2000/openfoodfacts-products.jsonl --write
+
+# Import enriched Woolworths/Coles data
+./scripts/run_import.sh scripts/import_enriched.py \
+    --input /data2000/enriched_products_normalised.jsonl --write
+```
+
+---
+
+## 6. Gunicorn / Systemd
+
+Create `/etc/systemd/system/trigzi_api.service`:
+
 ```ini
 [Unit]
 Description=Gunicorn instance to serve TRIGZI API
@@ -57,95 +102,125 @@ After=network.target
 
 [Service]
 User=root
-Group=www-data
+Group=nginx
 WorkingDirectory=/var/www/trigzi
 Environment="PATH=/var/www/trigzi/venv/bin"
+EnvironmentFile=/etc/trigzi/env
 
-# Boot 3 workers and bind to localhost port 5000. 
-# We use localhost so the API is inaccessible from the public internet bypassing NGINX.
-ExecStart=/var/www/trigzi/venv/bin/gunicorn --workers 3 --bind 127.0.0.1:5000 -m 007 app:app
+ExecStart=/var/www/trigzi/venv/bin/gunicorn \
+    --workers 3 \
+    --bind 127.0.0.1:5000 \
+    -m 007 \
+    app:app
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start the service:
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable trigzi_api
-sudo systemctl start trigzi_api
+systemctl daemon-reload
+systemctl enable trigzi_api
+systemctl start trigzi_api
 ```
 
-## 5. NGINX Reverse Proxy
-NGINX acts as the gatekeeper. It serves `/html` directly from disk (fast) and proxies `/api/` to Gunicorn (dynamic).
+---
 
-Create the configuration file:
-```bash
-sudo vi /etc/nginx/conf.d/trigzi.com.conf
-```
+## 7. Nginx
 
-Paste the routing logic:
+Configuration at `/etc/nginx/conf.d/trigzi.com.conf`:
+
 ```nginx
 server {
-    listen 80;
-    listen [::]:80;
-    server_name trigzi.com [www.trigzi.com](https://www.trigzi.com);
+    listen                  443 ssl;
+    listen                  [::]:443 ssl;
+    server_name             trigzi.com www.trigzi.com;
 
-    # Frontend html files
-    root /var/www/trigzi/html;
+    root                    /var/www/trigzi/html;
 
-    # Logging
-    access_log /var/log/nginx/trigzi.access.log combined buffer=512k flush=1m;
-    error_log /var/log/nginx/trigzi.error.log warn;
+    ssl_certificate         /etc/letsencrypt/live/trigzi.com/fullchain.pem;
+    ssl_certificate_key     /etc/letsencrypt/live/trigzi.com/privkey.pem;
+    include                 /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam             /etc/letsencrypt/ssl-dhparams.pem;
 
-    # Frontend SPA fallback
+    access_log              /var/log/nginx/trigzi.access.log combined buffer=512k flush=1m;
+    error_log               /var/log/nginx/trigzi.error.log warn;
+
     location / {
         try_files $uri $uri/ /index.html;
     }
 
-    # Backend API Proxy
+    # Standard API endpoints
     location /api/ {
-        proxy_pass [http://127.0.0.1:5000](http://127.0.0.1:5000);
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass              http://127.0.0.1:5000;
+        proxy_set_header        Host $host;
+        proxy_set_header        X-Real-IP $remote_addr;
+        proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header        X-Forwarded-Proto $scheme;
+        proxy_connect_timeout   10s;
+        proxy_send_timeout      60s;
+        proxy_read_timeout      60s;
     }
+
+    # Product lookup — SSE streaming, disable buffering
+    location /api/v1/product/ {
+        proxy_pass              http://127.0.0.1:5000;
+        proxy_set_header        Host $host;
+        proxy_set_header        X-Real-IP $remote_addr;
+        proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header        X-Forwarded-Proto $scheme;
+        proxy_connect_timeout   10s;
+        proxy_send_timeout      120s;
+        proxy_read_timeout      120s;
+        proxy_buffering         off;
+        proxy_cache             off;
+        chunked_transfer_encoding on;
+    }
+}
+
+server {
+    listen      80;
+    listen      [::]:80;
+    server_name trigzi.com www.trigzi.com;
+    if ($host = www.trigzi.com) { return 301 https://$host$request_uri; }
+    if ($host = trigzi.com)     { return 301 https://$host$request_uri; }
+    return 404;
 }
 ```
 
-Verify syntax and reload:
 ```bash
-sudo nginx -t
-sudo systemctl reload nginx
+nginx -t && systemctl reload nginx
 ```
 
-## 6. SSL Configuration (Certbot)
-We use EFF's Certbot to automatically provision Let's Encrypt SSL certificates and modify our NGINX config to enforce HTTPS redirects.
+## 8. SSL
 
 ```bash
-sudo certbot --nginx -d trigzi.com -d [www.trigzi.com](https://www.trigzi.com)
+certbot --nginx -d trigzi.com -d www.trigzi.com
 ```
-*Note: Certbot will automatically rewrite the `/etc/nginx/conf.d/trigzi.com.conf` file to include the SSL termination parameters and port 443 listeners.*
 
 ---
 
-## 7. Operational Cheatsheet
+## 9. Operations
 
-**Check the Application Logs (The first stop for 500 errors):**
 ```bash
-sudo journalctl -u trigzi_api.service -n 50 -f
-```
+# Deploy (bounce gunicorn + nginx)
+./deploy.sh
 
-**Check NGINX Logs (The first stop for 502/404 errors):**
-```bash
-sudo tail -f /var/log/nginx/trigzi.error.log
-sudo tail -f /var/log/nginx/trigzi.access.log
-```
+# View logs
+./logs.sh
 
-**Standard Deployment Bounce:**
-After pulling new code, always bounce the application server to load the new Python files into memory.
-```bash
-sudo systemctl restart trigzi_api
-```
+# Application logs
+journalctl -u trigzi_api -n 50 -f
+
+# nginx logs
+tail -f /var/log/nginx/trigzi.access.log
+tail -f /var/log/nginx/trigzi.error.log
+
+# Run test suite
+./run_tests.sh
+
+# Check LLM provider health
+./scripts/probe_live.py all
+
+# Product acquisition queue
+sort logs/unmatched.log | uniq -c | sort -rn | head -50
 ```
