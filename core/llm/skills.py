@@ -115,3 +115,47 @@ INSTRUCTIONS:
 OUTPUT SCHEMA:
 {SkillsLibrary.output_schema()}"""
 
+    @staticmethod
+    def enrich_product_prompt(record: dict) -> str:
+        """
+        Prompt for product clinical profile enrichment.
+
+        Takes a raw product record (name, ingredients, nutrition) and
+        produces a structured clinical profile (FODMAP, coeliac, histamine,
+        allergens, health summary).
+
+        Args:
+            record: Product dict with name, raw_ingredients, nutrition_100g,
+                    health_star_rating fields.
+
+        Returns:
+            Complete prompt string ready to embed in a text request.
+        """
+        import json
+        return f"""ACT AS: A clinical dietician and food safety expert.
+TASK: Analyse this product and return a clinical gut health profile.
+
+Product name: {record.get('name', '')}
+Ingredients: {record.get('raw_ingredients', '')}
+Nutrition per 100g: {json.dumps(record.get('nutrition_100g'))}
+Existing health star rating: {record.get('health_star_rating')}
+
+INSTRUCTIONS:
+1. Rate FODMAP content (0=none, 1=low, 2=medium, 3=high, -1=unknown).
+2. Rate coeliac risk (0=safe, 1=cross-contamination, 2=low, 3=high, -1=unknown).
+3. Rate histamine load (0=safe, 1=low, 2=moderate, 3=high, -1=unknown).
+4. List allergens present (Top 14 EU list). Empty array if none.
+5. If existing_health_star is provided, return null for estimated_health_star.
+   Otherwise estimate 0.5-5.0 in 0.5 steps from the nutrition data.
+6. Write a one-sentence gut health summary based strictly on the ingredients.
+7. Return ONLY valid JSON matching the schema below. No markdown, no backticks.
+
+OUTPUT SCHEMA:
+{{
+  "estimated_health_star": null,
+  "fodmap_rating": 1,
+  "coeliac_rating": 0,
+  "histamine_rating": 1,
+  "allergen_warnings": ["Milk", "Soy"],
+  "health_summary": "One sentence gut health summary."
+}}"""

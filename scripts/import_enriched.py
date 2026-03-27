@@ -126,6 +126,14 @@ def run(input_file: str, write: bool) -> None:
                 record['gtin']       = gtin
                 record['_source_id'] = gtin
 
+                # Normalise Woolworths image URL: large → medium
+                img = record.get('image_url', '')
+                if img and 'wowproductimages/large/' in img:
+                    record['image_url'] = img.replace(
+                        'wowproductimages/large/',
+                        'wowproductimages/medium/'
+                    )
+
                 if write:
                     batch.append((
                         gtin,

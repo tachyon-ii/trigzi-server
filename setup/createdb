@@ -37,10 +37,12 @@ USE ${1};
 --
 -- Tracks the exact LLM model + prompt version that produced each enrichment.
 -- products.enrichment_id is a FK to this table.
--- When a prompt is updated, re-enrichment candidates are:
+-- Re-enrichment candidates (prompt OR model changed):
 --   SELECT gtin FROM products
 --   WHERE enrichment_id IN (
---     SELECT id FROM enrichments WHERE prompt_ver != 'extract_v3'
+--     SELECT id FROM enrichments
+--     WHERE prompt_ver != 'extract_v3'
+--     OR llm_model NOT IN ('gemini-2.5-flash')
 --   )
 --
 
@@ -54,7 +56,7 @@ CREATE TABLE enrichments (
     created_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     PRIMARY KEY (id),
-    UNIQUE KEY idx_prompt_hash (prompt_hash),      -- dedup: same prompt = same row
+    UNIQUE KEY idx_prompt_model (prompt_hash, llm_model), -- dedup: same prompt+model = same row
     INDEX idx_task_prompt (task, prompt_ver)
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4

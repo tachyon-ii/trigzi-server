@@ -20,7 +20,7 @@ Sort unmatched by frequency:
 
 import os
 import time
-from flask import Blueprint, request, jsonify
+from quart import Blueprint, request, jsonify
 
 BASE_DIR      = os.path.join(os.path.dirname(__file__), '..')
 SCANS_DIR     = os.path.join(BASE_DIR, 'logs', 'scans')
@@ -88,9 +88,9 @@ def log_unmatched(gtin: str) -> None:
 @telemetry_bp.route('/api/v1/telemetry/unmatched', methods=['POST'])
 @telemetry_bp.route('/api/v1/telemetry/unmatched/gtin', methods=['POST'])
 @telemetry_bp.route('/api/v1/telemetry/unmatched/<gtin>', methods=['GET'])
-def telemetry_unmatched(gtin=None):
+async def telemetry_unmatched(gtin=None):
     if gtin is None:
-        data = request.get_json(silent=True) or {}
+        data = await request.get_json(silent=True) or {}
         gtin = data.get('term', '').strip()
     if gtin:
         log_unmatched(gtin)
