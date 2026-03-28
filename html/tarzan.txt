@@ -1,6 +1,6 @@
-# tarzan.py snapshot — 2026-03-27 21:03
+# tarzan.py snapshot - 2026-03-28 17:24
 # root: /var/www/trigzi
-# files: 40
+# files: 43
 
 ==============
 #  app.py
@@ -3398,20 +3398,21 @@ if __name__ == '__main__':
 ===========================
 #!/usr/bin/env python3
 from __future__ import annotations
-"""
-scripts/llm_pull.py
-
-Stage 2: Parse a raw LLM response file → validate → pretty print.
-
-Can be run repeatedly against the same response file to iterate
-the parser without re-calling the LLM. Response files are the
-regression test corpus.
-
-Usage:
-    ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt
-    ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt --strict
-    ./scripts/llm_pull.py logs/llm_responses/*.txt   # batch
-"""
+#
+#  scripts/llm_pull.py
+#
+#  Stage 2: Parse a raw LLM response file -> validate -> pretty print.
+#
+#  Can be run repeatedly against the same response file to iterate
+#  the parser without re-calling the LLM. Response files are the
+#  regression test corpus. Works with responses from any provider --
+#  model is read from the # MODEL: header written by llm_push.py.
+#
+#  Usage:
+#      ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt
+#      ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt --strict
+#      ./scripts/llm_pull.py logs/llm_responses/*.txt   # batch
+#
 
 import os
 import sys
@@ -3450,18 +3451,30 @@ FIELDS = [
 FIELD_NAMES = {f[0] for f in FIELDS}
 
 
+def parse_header(text: str) -> dict:
+    """Extract # KEY: value header lines written by llm_push.py."""
+    meta = {}
+    for line in text.split('\n'):
+        if not line.startswith('#'):
+            break
+        if ':' in line:
+            key, _, val = line[1:].partition(':')
+            meta[key.strip().lower()] = val.strip()
+    return meta
+
+
 def parse_response(text: str) -> tuple[dict, list[str]]:
     """
     Parse key: value lines from LLM response.
+    Skips comment header lines (start with #).
     Returns (parsed_dict, list_of_warnings).
     """
     parsed   = {}
     warnings = []
 
-    # Strip comment header lines (start with #)
-    lines = [l for l in text.split('\n') if not l.startswith('#')]
-
-    for line in lines:
+    for line in text.split('\n'):
+        if line.startswith('#'):
+            continue
         line = line.strip()
         if not line:
             continue
@@ -3504,9 +3517,8 @@ def coerce(parsed: dict) -> tuple[dict, list[str]]:
             if typ == float:
                 result[key] = float(raw)
             elif typ == int:
-                result[key] = int(float(raw))  # handle "2.0"
+                result[key] = int(float(raw))
             elif typ == list:
-                # Strip leading label (e.g. "Ingredients: ...")
                 raw = re.sub(r'^\s*\w[\w\s]*:\s*', '', raw, count=1)
                 result[key] = [i.strip() for i in raw.split(',') if i.strip()]
             else:
@@ -3518,7 +3530,7 @@ def coerce(parsed: dict) -> tuple[dict, list[str]]:
     return result, errors
 
 
-def to_schema(coerced: dict, gtin: str) -> dict:
+def to_schema(coerced: dict, gtin: str, model: str) -> dict:
     """Map parsed fields to unified product schema."""
     return {
         "gtin":             gtin,
@@ -3555,7 +3567,7 @@ def to_schema(coerced: dict, gtin: str) -> dict:
         },
         "_source_id":      gtin,
         "_source_name":    "ocr",
-        "_enrichment_llm": "ocr_pipeline",
+        "_enrichment_llm": model or "ocr_pipeline",
     }
 
 
@@ -3568,11 +3580,13 @@ def process_file(path: str, strict: bool) -> bool:
     with open(path, 'r', encoding='utf-8') as f:
         text = f.read()
 
-    # Extract GTIN from header
-    gtin_match = re.search(r'^# GTIN: (.+)$', text, re.MULTILINE)
-    gtin = gtin_match.group(1).strip() if gtin_match else 'unknown'
+    meta  = parse_header(text)
+    gtin  = meta.get('gtin', 'unknown')
+    model = meta.get('model', 'unknown')
 
-    # Parse
+    print(f"GTIN  : {gtin}")
+    print(f"MODEL : {model}")
+
     parsed, warnings = parse_response(text)
 
     if warnings:
@@ -3580,18 +3594,16 @@ def process_file(path: str, strict: bool) -> bool:
         for w in warnings:
             print(f"  ! {w}")
 
-    # Coerce
     coerced, errors = coerce(parsed)
 
     if errors:
         print(f"\nCOERCE ERRORS ({len(errors)}):")
         for e in errors:
-            print(f"  ✗ {e}")
+            print(f"  x {e}")
         if strict:
             return False
 
-    # Map to schema
-    schema = to_schema(coerced, gtin)
+    schema = to_schema(coerced, gtin, model)
 
     print(f"\nSCHEMA OUTPUT:")
     print(json.dumps(schema, indent=2, ensure_ascii=False))
@@ -3603,12 +3615,12 @@ def process_file(path: str, strict: bool) -> bool:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Stage 2: Parse LLM response → validate → pretty print."
+        description="Stage 2: Parse LLM response -> validate -> pretty print."
     )
     parser.add_argument('files', nargs='+',
-                        help="Response file(s) from llm_push.py")
+        help="Response file(s) from llm_push.py")
     parser.add_argument('--strict', action='store_true',
-                        help="Exit non-zero if any errors found")
+        help="Exit non-zero if any errors found")
     args = parser.parse_args()
 
     results = []
@@ -3631,37 +3643,36 @@ if __name__ == '__main__':
 ===========================
 #!/usr/bin/env python3
 from __future__ import annotations
-"""
-scripts/llm_push.py
-
-Stage 1: Send a scan file to the LLM and write the raw response.
-
-The raw response is saved to logs/llm_responses/<timestamp>_<gtin>.txt
-for processing by llm_pull.py (Stage 2).
-
-Usage:
-    ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt
-    ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt --prompt prompts/v2.txt
-"""
+#
+#  scripts/llm_push.py
+#
+#  Stage 1: Send a scan file to the LLM router and write the raw response.
+#
+#  Routes through core/llm/router.py for provider failover.
+#  Provider is selected by --provider (default: gemini).
+#
+#  The raw response is saved to logs/llm_responses/<timestamp>_<gtin>.txt
+#  for processing by llm_pull.py (Stage 2).
+#
+#  Usage:
+#      ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt
+#      ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt --prompt prompts/extract_v2.txt
+#      ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt --provider claude
+#
 
 import os
 import sys
 import time
 import json
-import urllib.request
-import urllib.error
+import asyncio
 import argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-RESPONSES_DIR = os.path.join(os.path.dirname(__file__), '..', 'logs', 'llm_responses')
-DEFAULT_PROMPT = os.path.join(os.path.dirname(__file__), '..', 'prompts', 'extract_v1.txt')
+from core.llm.router import router
 
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_URL   = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent?key={{api_key}}"
-)
+RESPONSES_DIR  = os.path.join(os.path.dirname(__file__), '..', 'logs', 'llm_responses')
+DEFAULT_PROMPT = os.path.join(os.path.dirname(__file__), '..', 'prompts', 'extract_v1.txt')
 
 
 def load_scan(path: str) -> dict:
@@ -3670,24 +3681,16 @@ def load_scan(path: str) -> dict:
         content = f.read()
 
     parts = {}
-    lines = content.split('\n')
-
-    # Extract header fields
-    for line in lines:
+    for line in content.split('\n'):
         for key in ('GTIN', 'TIMESTAMP', 'SOURCE'):
             if line.startswith(f'{key}:'):
                 parts[key.lower()] = line.split(':', 1)[1].strip()
 
-    # Extract sections
     for section in ('FRONT OF PACKAGE', 'NUTRITION & INGREDIENTS', 'INGREDIENTS'):
         marker = f'=== {section} ==='
         if marker in content:
             after = content.split(marker, 1)[1]
-            # Take until next section or end
-            if '===' in after:
-                text = after.split('===', 1)[0]
-            else:
-                text = after
+            text  = after.split('===', 1)[0] if '===' in after else after
             parts[section.lower().replace(' ', '_').replace('&_', '')] = text.strip()
 
     return parts
@@ -3698,55 +3701,46 @@ def load_prompt(path: str) -> str:
         return f.read()
 
 
-def call_gemini(prompt: str, api_key: str) -> str:
-    """Call Gemini with a plain text prompt, return raw text response."""
-    url     = GEMINI_URL.format(api_key=api_key)
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.1,
-        }
-    }
-    data = json.dumps(payload).encode('utf-8')
-    req  = urllib.request.Request(
-        url, data=data,
-        headers={'Content-Type': 'application/json'}
+async def call_router(prompt: str, provider: str, timeout: float) -> tuple[str, str]:
+    """Call the LLM router. Returns (response_text, model_used)."""
+    response = await router.analyze(
+        payload       = {"prompt": prompt},
+        profile       = "",
+        model_strings = [provider],
+        optimize      = "accuracy",
+        timeout       = timeout,
     )
+    result = response.get("result", {})
+    model  = response.get("model", provider)
 
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = json.loads(resp.read().decode('utf-8'))
-        return (body
-                .get('candidates', [{}])[0]
-                .get('content', {})
-                .get('parts', [{}])[0]
-                .get('text', ''))
+    # result may be a dict (JSON) or a raw string depending on provider
+    if isinstance(result, dict):
+        text = json.dumps(result, ensure_ascii=False, indent=2)
+    else:
+        text = str(result)
+
+    return text, model
 
 
-def run(scan_path: str, prompt_path: str) -> str:
-    api_key = os.environ.get('GEMINI_API_KEY', '')
-    if not api_key:
-        print("ERROR: GEMINI_API_KEY not set")
-        sys.exit(1)
+def run(scan_path: str, prompt_path: str, provider: str, timeout: float) -> str:
+    print(f"Scan     : {scan_path}")
+    print(f"Prompt   : {prompt_path}")
+    print(f"Provider : {provider}")
 
-    print(f"Scan   : {scan_path}")
-    print(f"Prompt : {prompt_path}")
-
-    scan   = load_scan(scan_path)
+    scan            = load_scan(scan_path)
     prompt_template = load_prompt(prompt_path)
 
-    # Build the full prompt
     prompt = prompt_template.format(
         text_front     = scan.get('front_of_package', ''),
         text_nutrition = scan.get('nutrition_ingredients', '') or scan.get('ingredients', ''),
     )
 
-    print(f"Calling {GEMINI_MODEL}...")
-    t0       = time.time()
-    response = call_gemini(prompt, api_key)
-    elapsed  = time.time() - t0
-    print(f"Response in {elapsed:.1f}s ({len(response)} chars)")
+    print(f"Calling router ({provider})...")
+    t0               = time.time()
+    text, model_used = asyncio.run(call_router(prompt, provider, timeout))
+    elapsed          = time.time() - t0
+    print(f"Response in {elapsed:.1f}s ({len(text)} chars) via {model_used}")
 
-    # Save raw response
     os.makedirs(RESPONSES_DIR, exist_ok=True)
     gtin     = scan.get('gtin', 'unknown')
     out_file = os.path.join(RESPONSES_DIR, f"{int(time.time())}_{gtin}.txt")
@@ -3754,28 +3748,34 @@ def run(scan_path: str, prompt_path: str) -> str:
     with open(out_file, 'w', encoding='utf-8') as f:
         f.write(f"# SCAN: {scan_path}\n")
         f.write(f"# PROMPT: {prompt_path}\n")
-        f.write(f"# MODEL: {GEMINI_MODEL}\n")
+        f.write(f"# MODEL: {model_used}\n")
         f.write(f"# ELAPSED: {elapsed:.1f}s\n")
         f.write(f"# GTIN: {gtin}\n")
         f.write(f"#\n")
-        f.write(response)
+        f.write(text)
 
     print(f"Saved  : {out_file}")
     print()
     print("--- RAW RESPONSE ---")
-    print(response)
+    print(text)
     return out_file
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Stage 1: Send scan file to LLM, save raw response."
+        description="Stage 1: Send scan file to LLM router, save raw response."
     )
-    parser.add_argument('scan', help="Path to scan file (logs/scans/*.txt)")
+    parser.add_argument('scan',
+        help="Path to scan file (logs/scans/*.txt)")
     parser.add_argument('--prompt', default=DEFAULT_PROMPT,
-                        help=f"Prompt template (default: {DEFAULT_PROMPT})")
+        help=f"Prompt template (default: extract_v1.txt)")
+    parser.add_argument('--provider', default='gemini',
+        choices=['gemini', 'claude', 'openai'],
+        help="LLM provider (default: gemini)")
+    parser.add_argument('--timeout', type=float, default=60.0,
+        help="Request timeout in seconds (default: 60)")
     args = parser.parse_args()
-    run(args.scan, args.prompt)
+    run(args.scan, args.prompt, args.provider, args.timeout)
 
 
 ===========================================
@@ -4255,6 +4255,198 @@ if __name__ == "__main__":
     asyncio.run(main(requested))
 
 
+==============================
+#  tests/test_analyser.py
+==============================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  tests/test_analyser.py
+#
+#  Unit tests for core/analyser.py
+#  All LLM router calls are mocked -- no real API calls made.
+#
+
+import unittest
+from unittest.mock import AsyncMock, patch, MagicMock
+
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+MOCK_RESULT = {
+    "type": "meal_photo",
+    "items": [{"name": "Pad Thai", "safe": True, "verdict": "Safe",
+               "summary": "Generally safe.", "warnings": [],
+               "ingredients": ["noodles", "egg"], "flaggedIngredients": [],
+               "detailedReason": "No flagged ingredients."}]
+}
+
+MOCK_ROUTER_RESPONSE = {
+    "result":       MOCK_RESULT,
+    "model":        "gemini-2.5-flash",
+    "provider":     "Gemini",
+    "latency_ms":   320,
+    "was_fallback": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# analyse_product
+# ---------------------------------------------------------------------------
+
+class TestAnalyseProduct(unittest.IsolatedAsyncioTestCase):
+
+    async def test_returns_result_on_success(self):
+        from core.analyser import analyse_product
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_RESPONSE
+            result = await analyse_product(
+                gtin="0070177161170",
+                text_front="Brand Name Crackers",
+                text_nutrition="Wheat, Salt, Oil"
+            )
+        self.assertEqual(result, MOCK_RESULT)
+
+    async def test_payload_contains_combined_text(self):
+        """Both front and nutrition text should be included in the payload."""
+        from core.analyser import analyse_product
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_RESPONSE
+            await analyse_product(
+                gtin="0070177161170",
+                text_front="Front label text",
+                text_nutrition="Nutrition text"
+            )
+        payload = mock.call_args.kwargs["payload"]
+        self.assertIn("Front label text",  payload["text"])
+        self.assertIn("Nutrition text",    payload["text"])
+
+    async def test_returns_none_when_both_texts_empty(self):
+        from core.analyser import analyse_product
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            result = await analyse_product(gtin="0070177161170", text_front="", text_nutrition="")
+        self.assertIsNone(result)
+        mock.assert_not_called()
+
+    async def test_returns_none_on_router_exception(self):
+        from core.analyser import analyse_product
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.side_effect = Exception("Router failed")
+            result = await analyse_product(
+                gtin="0070177161170",
+                text_front="something",
+                text_nutrition=""
+            )
+        self.assertIsNone(result)
+
+    async def test_uses_accuracy_optimize(self):
+        from core.analyser import analyse_product
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_RESPONSE
+            await analyse_product("x", "front", "nutrition")
+        self.assertEqual(mock.call_args.kwargs["optimize"], "accuracy")
+
+
+# ---------------------------------------------------------------------------
+# analyse_meal
+# ---------------------------------------------------------------------------
+
+class TestAnalyseMeal(unittest.IsolatedAsyncioTestCase):
+
+    async def test_returns_result_on_success(self):
+        from core.analyser import analyse_meal
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_RESPONSE
+            result = await analyse_meal(image="base64data==", profile="Low FODMAP")
+        self.assertEqual(result, MOCK_RESULT)
+
+    async def test_payload_uses_image_base64_key(self):
+        """Meal analysis must send image_base64 so base.py routes to multimodal."""
+        from core.analyser import analyse_meal
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_RESPONSE
+            await analyse_meal(image="base64data==", profile="")
+        payload = mock.call_args.kwargs["payload"]
+        self.assertIn("image_base64", payload)
+        self.assertEqual(payload["image_base64"], "base64data==")
+
+    async def test_profile_forwarded_to_router(self):
+        from core.analyser import analyse_meal
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_RESPONSE
+            await analyse_meal(image="data==", profile="Dairy Free")
+        self.assertEqual(mock.call_args.kwargs["profile"], "Dairy Free")
+
+    async def test_returns_none_for_empty_image(self):
+        from core.analyser import analyse_meal
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            result = await analyse_meal(image="", profile="")
+        self.assertIsNone(result)
+        mock.assert_not_called()
+
+    async def test_returns_none_on_router_exception(self):
+        from core.analyser import analyse_meal
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.side_effect = Exception("timeout")
+            result = await analyse_meal(image="data==", profile="")
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# analyse_menu
+# ---------------------------------------------------------------------------
+
+class TestAnalyseMenu(unittest.IsolatedAsyncioTestCase):
+
+    async def test_returns_result_on_success(self):
+        from core.analyser import analyse_menu
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_RESPONSE
+            result = await analyse_menu(text="Pad Thai $18\nGreen Curry $20", profile="Nut allergy")
+        self.assertEqual(result, MOCK_RESULT)
+
+    async def test_payload_uses_text_key(self):
+        from core.analyser import analyse_menu
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_RESPONSE
+            await analyse_menu(text="menu text", profile="")
+        payload = mock.call_args.kwargs["payload"]
+        self.assertIn("text", payload)
+        self.assertEqual(payload["text"], "menu text")
+
+    async def test_returns_none_for_empty_text(self):
+        from core.analyser import analyse_menu
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            result = await analyse_menu(text="", profile="")
+        self.assertIsNone(result)
+        mock.assert_not_called()
+
+    async def test_returns_none_on_router_exception(self):
+        from core.analyser import analyse_menu
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.side_effect = RuntimeError("provider down")
+            result = await analyse_menu(text="some menu", profile="")
+        self.assertIsNone(result)
+
+    async def test_uses_three_default_models(self):
+        """Failover chain should include all three providers."""
+        from core.analyser import analyse_menu, DEFAULT_MODELS
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_RESPONSE
+            await analyse_menu(text="menu", profile="")
+        models = mock.call_args.kwargs["model_strings"]
+        self.assertEqual(set(models), set(DEFAULT_MODELS))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
 ============================
 #  tests/test_config.py
 ============================
@@ -4302,6 +4494,253 @@ class TestLLMConfig(unittest.TestCase):
 
         # Unknown models should return None for cost
         self.assertIsNone(self.config.estimate_cost("unknown-model", 100, 100))
+
+
+==============================
+#  tests/test_enricher.py
+==============================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  tests/test_enricher.py
+#
+#  Unit tests for core/enricher.py
+#  All LLM router calls, DB calls, and file I/O are mocked.
+#
+
+import unittest
+from unittest.mock import AsyncMock, MagicMock, patch, mock_open
+
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+FOOD_RECORD = {
+    "gtin":            "0070177161170",
+    "source":          "off",
+    "name":            "Test Crackers",
+    "brand":           "Test Brand",
+    "category":        "Pantry",
+    "raw_ingredients": "Wheat flour, Salt, Palm oil",
+    "nutrition_100g":  {"energy_kj": 1800.0, "protein_g": 8.0},
+    "health_star_rating": 3.0,
+    "_source_name":    "off",
+    "_enrichment_llm": None,
+    "clinical_profile": None,
+}
+
+NON_FOOD_RECORD = dict(FOOD_RECORD, category="Cleaning & Laundry", name="Dish Soap")
+
+MOCK_CLINICAL_PROFILE = {
+    "estimated_health_star": None,
+    "fodmap_rating":         1,
+    "coeliac_rating":        3,
+    "histamine_rating":      0,
+    "allergen_warnings":     ["Gluten"],
+    "health_summary":        "Contains gluten; unsuitable for coeliacs.",
+}
+
+MOCK_ROUTER_RESPONSE = {
+    "result":       MOCK_CLINICAL_PROFILE,
+    "model":        "gemini-2.5-flash",
+    "provider":     "Gemini",
+    "latency_ms":   410,
+    "was_fallback": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# enrich() -- food products
+# ---------------------------------------------------------------------------
+
+class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
+
+    async def _run_enrich(self, record, router_response=None, enrichment_id=7):
+        """Helper: patch all external dependencies and call enrich()."""
+        from core.enricher import enrich
+
+        router_mock = AsyncMock(return_value=router_response or MOCK_ROUTER_RESPONSE)
+
+        with patch("core.enricher.router.analyze",        router_mock), \
+             patch("core.enricher.get_or_create_enrichment", return_value=enrichment_id), \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation"), \
+             patch("core.enricher._off.save"):
+            return await enrich(record), router_mock
+
+    async def test_returns_enriched_record(self):
+        result, _ = await self._run_enrich(FOOD_RECORD)
+        self.assertIsNotNone(result.get("clinical_profile"))
+        self.assertEqual(result["clinical_profile"], MOCK_CLINICAL_PROFILE)
+
+    async def test_sets_enrichment_llm_model(self):
+        result, _ = await self._run_enrich(FOOD_RECORD)
+        self.assertEqual(result["_enrichment_llm"], "gemini-2.5-flash")
+
+    async def test_calls_router_with_product_payload(self):
+        _, mock = await self._run_enrich(FOOD_RECORD)
+        payload = mock.call_args.kwargs["payload"]
+        self.assertIn("product", payload)
+        self.assertEqual(payload["product"]["gtin"], FOOD_RECORD["gtin"])
+
+    async def test_calls_get_or_create_enrichment(self):
+        from core.enricher import enrich, PROMPT_VER
+
+        with patch("core.enricher.router.analyze", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
+             patch("core.enricher.get_or_create_enrichment", return_value=7) as mock_enrich_id, \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation"), \
+             patch("core.enricher._off.save"):
+            await enrich(FOOD_RECORD)
+
+        mock_enrich_id.assert_called_once()
+        kwargs = mock_enrich_id.call_args.kwargs if mock_enrich_id.call_args.kwargs \
+                 else dict(zip(["task","llm_model","prompt_ver","prompt_text"],
+                               mock_enrich_id.call_args.args))
+        self.assertEqual(kwargs.get("task") or mock_enrich_id.call_args.args[0], "product")
+
+    async def test_saves_to_db_with_enrichment_id(self):
+        from core.enricher import enrich
+
+        save_mock = MagicMock()
+        with patch("core.enricher.router.analyze", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
+             patch("core.enricher.get_or_create_enrichment", return_value=42), \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation"), \
+             patch("core.enricher._off.save", save_mock):
+            await enrich(FOOD_RECORD)
+
+        save_mock.assert_called_once()
+        _, kwargs = save_mock.call_args
+        self.assertEqual(kwargs.get("enrichment_id") or save_mock.call_args.args[1], 42)
+
+    async def test_queues_for_validation_on_success(self):
+        from core.enricher import enrich
+
+        queue_mock = MagicMock()
+        with patch("core.enricher.router.analyze", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
+             patch("core.enricher.get_or_create_enrichment", return_value=7), \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation", queue_mock), \
+             patch("core.enricher._off.save"):
+            await enrich(FOOD_RECORD)
+
+        queue_mock.assert_called_once()
+
+    async def test_router_failure_sets_failed_status(self):
+        from core.enricher import enrich
+
+        save_mock = MagicMock()
+        with patch("core.enricher.router.analyze", AsyncMock(side_effect=Exception("LLM down"))), \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation"), \
+             patch("core.enricher._off.save", save_mock):
+            result = await enrich(FOOD_RECORD)
+
+        self.assertEqual(result["_enrichment_llm"], "FAILED")
+        save_mock.assert_called_once()
+        # enrichment_id must be None on failure
+        call_kwargs = save_mock.call_args
+        enrichment_id_arg = (call_kwargs.kwargs.get("enrichment_id")
+                             if call_kwargs.kwargs
+                             else call_kwargs.args[1] if len(call_kwargs.args) > 1
+                             else None)
+        self.assertIsNone(enrichment_id_arg)
+
+    async def test_does_not_queue_for_validation_on_failure(self):
+        from core.enricher import enrich
+
+        queue_mock = MagicMock()
+        with patch("core.enricher.router.analyze", AsyncMock(side_effect=Exception("down"))), \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation", queue_mock), \
+             patch("core.enricher._off.save"):
+            await enrich(FOOD_RECORD)
+
+        queue_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# enrich() -- non-food products
+# ---------------------------------------------------------------------------
+
+class TestEnrichNonFood(unittest.IsolatedAsyncioTestCase):
+
+    async def test_non_food_skips_router(self):
+        from core.enricher import enrich
+
+        router_mock = AsyncMock()
+        with patch("core.enricher.router.analyze", router_mock), \
+             patch("core.enricher.get_or_create_enrichment", return_value=1), \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation"), \
+             patch("core.enricher._off.save"):
+            await enrich(NON_FOOD_RECORD)
+
+        router_mock.assert_not_called()
+
+    async def test_non_food_sets_nop_profile(self):
+        from core.enricher import enrich
+
+        with patch("core.enricher.router.analyze", AsyncMock()), \
+             patch("core.enricher.get_or_create_enrichment", return_value=1), \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation"), \
+             patch("core.enricher._off.save"):
+            result = await enrich(NON_FOOD_RECORD)
+
+        self.assertIsNotNone(result["clinical_profile"])
+        self.assertEqual(result["clinical_profile"]["fodmap_rating"], -1)
+        self.assertIn("Non-food", result["clinical_profile"]["health_summary"])
+
+    async def test_non_food_llm_model_is_nop(self):
+        from core.enricher import enrich
+
+        with patch("core.enricher.router.analyze", AsyncMock()), \
+             patch("core.enricher.get_or_create_enrichment", return_value=1), \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation"), \
+             patch("core.enricher._off.save"):
+            result = await enrich(NON_FOOD_RECORD)
+
+        self.assertEqual(result["_enrichment_llm"], "NOP")
+
+
+# ---------------------------------------------------------------------------
+# _queue_for_validation() -- isolated
+# ---------------------------------------------------------------------------
+
+class TestQueueForValidation(unittest.TestCase):
+
+    def test_writes_json_line(self):
+        from core.enricher import _queue_for_validation
+        import json
+
+        written = []
+        m = mock_open()
+        m.return_value.__enter__.return_value.write = lambda s: written.append(s)
+
+        with patch("builtins.open", m), \
+             patch("os.makedirs"):
+            _queue_for_validation(FOOD_RECORD)
+
+        self.assertTrue(any(FOOD_RECORD["gtin"] in line for line in written))
+
+    def test_silently_handles_write_error(self):
+        """File write failures must not propagate -- enrichment should continue."""
+        from core.enricher import _queue_for_validation
+
+        with patch("builtins.open", side_effect=OSError("disk full")), \
+             patch("os.makedirs"):
+            _queue_for_validation(FOOD_RECORD)  # must not raise
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 ============================
@@ -4528,6 +4967,219 @@ class TestVariations:
 
     def test_ean14_nonzero_returns_empty(self):
         assert variations('10034000470693') == []
+
+
+================================
+#  tests/test_off_lookup.py
+================================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  tests/test_off_lookup.py
+#
+#  Unit tests for utils/off_lookup.py
+#  All DB calls are mocked -- no live database required.
+#
+
+import json
+import unittest
+from unittest.mock import MagicMock, patch
+
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from utils.off_lookup import OFFLookup
+
+
+# ---------------------------------------------------------------------------
+# Shared fixture helpers
+# ---------------------------------------------------------------------------
+
+def _make_conn(fetchone_return=None):
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__  = MagicMock(return_value=False)
+    cur.fetchone  = MagicMock(return_value=fetchone_return)
+
+    conn = MagicMock()
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__  = MagicMock(return_value=False)
+    conn.cursor    = MagicMock(return_value=cur)
+    return conn, cur
+
+
+SAMPLE_RECORD = {
+    "gtin":    "0070177161170",
+    "source":  "off",
+    "name":    "Test Product",
+    "brand":   "Test Brand",
+    "nutrition_100g": {"energy_kj": 400.0},
+    "clinical_profile": None,
+    "_enrichment_llm": None,
+}
+
+
+# ---------------------------------------------------------------------------
+# get()
+# ---------------------------------------------------------------------------
+
+class TestOFFLookupGet(unittest.TestCase):
+
+    def test_returns_record_when_found(self):
+        conn, cur = _make_conn({"data": json.dumps(SAMPLE_RECORD)})
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            result = OFFLookup().get("0070177161170")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["gtin"], "0070177161170")
+        self.assertEqual(result["name"], "Test Product")
+
+    def test_returns_none_when_not_found(self):
+        conn, cur = _make_conn(None)
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            result = OFFLookup().get("0070177161170")
+        self.assertIsNone(result)
+
+    def test_normalises_gtin_before_query(self):
+        """Short GTINs should be padded to 13 digits before lookup."""
+        conn, cur = _make_conn({"data": json.dumps(SAMPLE_RECORD)})
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            OFFLookup().get("70177161170")  # 11 digits
+        # args[0] = SQL string, args[1] = params tuple
+        sql, params = cur.execute.call_args[0]
+        self.assertIn("0070177161170", params)
+
+    def test_returns_none_for_invalid_gtin(self):
+        with patch("utils.off_lookup.get_conn") as mock_conn:
+            result = OFFLookup().get("abc")
+        self.assertIsNone(result)
+        mock_conn.assert_not_called()
+
+    def test_deserialises_json_string(self):
+        conn, cur = _make_conn({"data": json.dumps(SAMPLE_RECORD)})
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            result = OFFLookup().get("0070177161170")
+        self.assertIsInstance(result, dict)
+
+    def test_returns_dict_when_data_already_dict(self):
+        conn, cur = _make_conn({"data": SAMPLE_RECORD})
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            result = OFFLookup().get("0070177161170")
+        self.assertEqual(result["name"], "Test Product")
+
+    def test_returns_none_on_db_exception(self):
+        conn, cur = _make_conn()
+        cur.execute.side_effect = Exception("DB down")
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            result = OFFLookup().get("0070177161170")
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# exists()
+# ---------------------------------------------------------------------------
+
+class TestOFFLookupExists(unittest.TestCase):
+
+    def test_returns_true_when_row_found(self):
+        conn, cur = _make_conn({"1": 1})
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            self.assertTrue(OFFLookup().exists("0070177161170"))
+
+    def test_returns_false_when_row_missing(self):
+        conn, cur = _make_conn(None)
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            self.assertFalse(OFFLookup().exists("0070177161170"))
+
+    def test_returns_false_for_invalid_gtin(self):
+        with patch("utils.off_lookup.get_conn") as mock_conn:
+            self.assertFalse(OFFLookup().exists(""))
+        mock_conn.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# is_enriched()
+# ---------------------------------------------------------------------------
+
+class TestOFFLookupIsEnriched(unittest.TestCase):
+
+    def test_returns_true_when_enrichment_id_set(self):
+        conn, cur = _make_conn({"enrichment_id": 42})
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            self.assertTrue(OFFLookup().is_enriched("0070177161170"))
+
+    def test_returns_false_when_enrichment_id_null(self):
+        conn, cur = _make_conn({"enrichment_id": None})
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            self.assertFalse(OFFLookup().is_enriched("0070177161170"))
+
+    def test_returns_false_when_row_missing(self):
+        conn, cur = _make_conn(None)
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            self.assertFalse(OFFLookup().is_enriched("0070177161170"))
+
+
+# ---------------------------------------------------------------------------
+# save()
+# ---------------------------------------------------------------------------
+
+class TestOFFLookupSave(unittest.TestCase):
+
+    def test_save_upserts_record(self):
+        conn, cur = _make_conn()
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            result = OFFLookup().save(SAMPLE_RECORD, enrichment_id=7)
+        self.assertTrue(result)
+        sql, params = cur.execute.call_args[0]
+        self.assertIn("INSERT INTO products", sql)
+        self.assertIn("ON DUPLICATE KEY UPDATE", sql)
+
+    def test_save_passes_enrichment_id(self):
+        conn, cur = _make_conn()
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            OFFLookup().save(SAMPLE_RECORD, enrichment_id=99)
+        _, params = cur.execute.call_args[0]
+        self.assertIn(99, params)
+
+    def test_save_none_enrichment_id_allowed(self):
+        conn, cur = _make_conn()
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            result = OFFLookup().save(SAMPLE_RECORD, enrichment_id=None)
+        self.assertTrue(result)
+        _, params = cur.execute.call_args[0]
+        self.assertIn(None, params)
+
+    def test_save_normalises_gtin(self):
+        conn, cur = _make_conn()
+        record = dict(SAMPLE_RECORD, gtin="70177161170")
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            OFFLookup().save(record)
+        _, params = cur.execute.call_args[0]
+        self.assertEqual(params[0], "0070177161170")
+
+    def test_save_returns_false_for_invalid_gtin(self):
+        with patch("utils.off_lookup.get_conn") as mock_conn:
+            result = OFFLookup().save({"gtin": "abc"})
+        self.assertFalse(result)
+        mock_conn.assert_not_called()
+
+    def test_save_returns_false_on_db_exception(self):
+        conn, cur = _make_conn()
+        cur.execute.side_effect = Exception("DB error")
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            result = OFFLookup().save(SAMPLE_RECORD)
+        self.assertFalse(result)
+
+    def test_save_truncates_name_at_150(self):
+        conn, cur = _make_conn()
+        record = dict(SAMPLE_RECORD, name="X" * 200)
+        with patch("utils.off_lookup.get_conn", return_value=conn):
+            OFFLookup().save(record)
+        _, params = cur.execute.call_args[0]
+        self.assertLessEqual(len(params[2]), 150)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 ===========================

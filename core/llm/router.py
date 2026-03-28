@@ -1,5 +1,6 @@
 # core/llm/router.py
 import asyncio
+import os
 import uuid
 import random
 from datetime import datetime
@@ -10,6 +11,8 @@ from .config import config
 from .providers.gemini import GeminiProvider
 from .providers.claude import ClaudeProvider
 from .providers.openai import OpenAIProvider
+
+_RESPONSES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'logs', 'llm_responses')
 
 
 class LLMRouter:
@@ -87,6 +90,8 @@ class LLMRouter:
 
         resolved_tag = config.resolve(model_tag, provider_key)
         response     = await provider.analyze(payload, profile, resolved_tag, timeout)
+
+        response['payload'] = payload  # carry payload so _record_call can extract GTIN
 
         self._record_call(response, session_id, success=True)
         self._update_latency(resolved_tag, response["latency_ms"])
@@ -194,12 +199,41 @@ class LLMRouter:
         return "unknown", s
 
     def _record_call(self, response: Dict[str, Any], session_id: str, success: bool):
-        timestamp = datetime.now().isoformat()
+        timestamp = datetime.now()
+        ts_human  = timestamp.strftime('%Y-%m-%dT%H:%M:%SZ')
+        ts_file   = timestamp.strftime('%Y%m%d%H%M%S')
+
+        # Console log
         print(
-            f"📝 [LOG] {timestamp} | session={session_id} | "
+            f"📝 [LOG] {ts_human} | session={session_id} | "
             f"provider={response['provider']} | model={response['model']} | "
             f"latency={response['latency_ms']}ms | fallback={response.get('was_fallback', False)}"
         )
+
+        # File log — YYYYMMDDHHMMSS_{gtin}.txt, compatible with llm_pull.py
+        try:
+            payload = response.get('payload', {})
+            gtin    = (payload.get('product', {}) or {}).get('gtin', '') \
+                      or payload.get('gtin', '') \
+                      or 'unknown'
+            raw     = response.get('raw_json', '')
+
+            os.makedirs(_RESPONSES_DIR, exist_ok=True)
+            filename = f"{ts_file}_{gtin}.txt"
+
+            with open(os.path.join(_RESPONSES_DIR, filename), 'w', encoding='utf-8') as f:
+                f.write(f"# TIMESTAMP: {ts_human}\n")
+                f.write(f"# SESSION:   {session_id}\n")
+                f.write(f"# PROVIDER:  {response['provider']}\n")
+                f.write(f"# MODEL:     {response['model']}\n")
+                f.write(f"# LATENCY:   {response['latency_ms']}ms\n")
+                f.write(f"# FALLBACK:  {response.get('was_fallback', False)}\n")
+                f.write(f"# GTIN:      {gtin}\n")
+                f.write(f"#\n")
+                f.write(raw)
+
+        except Exception as e:
+            print(f"  [!] llm_responses write failed: {e}")
 
     def _update_latency(self, model_tag: str, latency_ms: int):
         if model_tag not in self._latency_cache:

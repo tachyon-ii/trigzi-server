@@ -22,6 +22,9 @@ echo "OK: Environment $DB_USER@$DB_NAME"
 echo "OK: Virtual environment $VIRTUAL_ENV"
 echo "Bouncing Trigzi services..."
 
+# first daemon-reload
+sudo systemctl daemon-reload
+
 # 3. Restart the Flask/Gunicorn backend
 sudo systemctl restart trigzi_api
 

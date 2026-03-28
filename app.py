@@ -49,7 +49,16 @@ async def get_product(gtin):
         return jsonify({"status": "complete", "product": record}), 200
 
     async def generate():
-        yield _sse("partial",  {"status": "partial",  "product": record})
+        # Stage 1: product found — iOS shows name on loading screen
+        name  = record.get("name",  "this product")
+        brand = record.get("brand", "")
+        label = f"{name} by {brand}" if brand else name
+        yield _sse("progress", {"message": f"Found {label}"})
+ 
+        # Stage 2: enrichment starting
+        yield _sse("progress", {"message": "Running latest analytics\u2026"})
+ 
+        # Stage 3: enriched result — iOS navigates to product detail
         enriched = await enrich(record)
         yield _sse("enriched", {"status": "complete", "product": enriched})
 

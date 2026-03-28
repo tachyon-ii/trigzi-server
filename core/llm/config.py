@@ -258,6 +258,41 @@ class LLMProviderConfig:
         """Sorted list of all configured provider names."""
         return sorted(self._config.get("providers", {}).keys())
 
+    # ------------------------------------------------------------------ #
+    # Task routing config                                                  #
+    # ------------------------------------------------------------------ #
+ 
+    _ROUTING_DEFAULTS = {
+        "models":   ["gemini", "claude", "openai"],
+        "optimize": "failover",
+        "timeout":  60.0,
+    }
+ 
+    def task_config(self, task: str) -> dict:
+        """
+        Return routing config for a named task.
+ 
+        Reads from the 'routing' section of llm_providers.json.
+        Falls back to sensible defaults if the task or section is absent.
+ 
+        Usage:
+            cfg = config.task_config("enrich")
+            response = await router.analyze(
+                payload       = ...,
+                profile       = ...,
+                model_strings = cfg["models"],
+                optimize      = cfg["optimize"],
+                timeout       = cfg["timeout"],
+            )
+        """
+        routing = self._config.get("routing", {})
+        task_cfg = routing.get(task, {})
+        return {
+            "models":   task_cfg.get("models",   self._ROUTING_DEFAULTS["models"]),
+            "optimize": task_cfg.get("optimize", self._ROUTING_DEFAULTS["optimize"]),
+            "timeout":  task_cfg.get("timeout",  self._ROUTING_DEFAULTS["timeout"]),
+        }
+
 
 # Module-level singleton — import this, not the class.
 config = LLMProviderConfig()

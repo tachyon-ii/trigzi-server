@@ -9,6 +9,10 @@ from __future__ import annotations
 #  Writes enrichment_id FK back to products so the exact prompt×model
 #  that produced each clinical profile is permanently recorded.
 #
+#  Routing (models, optimize, timeout) is read from the 'enrich' task
+#  in llm_providers.json via llm_config.task_config("enrich").
+#  No routing constants live in this file.
+#
 
 import os
 import json
@@ -19,10 +23,10 @@ from core.db import get_or_create_enrichment
 from core.telemetry import log_scan
 from core.llm.router import router
 from core.llm.skills import SkillsLibrary
+from core.llm.config import config as llm_config
 
 VALIDATE_JSONL = "/var/www/trigzi/logs/validate.jsonl"
 PROMPT_VER     = "enrich_v1"
-DEFAULT_MODELS = ["gemini", "claude", "openai"]
 
 NON_FOOD_CATEGORIES = {
     "Cleaning & Laundry",
@@ -76,13 +80,15 @@ async def enrich(record: dict) -> dict:
 
         prompt_text = SkillsLibrary.enrich_product_prompt(record)
 
+        _cfg = llm_config.task_config("enrich")
+
         try:
             response = await router.analyze(
                 payload       = {"product": record, "prompt": prompt_text},
                 profile       = "",
-                model_strings = DEFAULT_MODELS,
-                optimize      = "accuracy",
-                timeout       = 60.0,
+                model_strings = _cfg["models"],
+                optimize      = _cfg["optimize"],
+                timeout       = _cfg["timeout"],
             )
             profile_data = response.get("result")
             llm_model    = response.get("model", "router")
