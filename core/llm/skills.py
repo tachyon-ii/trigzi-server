@@ -42,6 +42,6 @@ class SkillsLibrary:
         )
 
     @staticmethod
-    def analyze_menu_prompt(ocr_text: str) -> str:
-        template = SkillsLibrary._load_prompt('menu_extract.txt')
+    def analyse_menu_prompt(ocr_text: str) -> str:
+        template = SkillsLibrary._load_prompt('analyse_menu.txt')
         return template.format(menu_text=ocr_text)

@@ -146,12 +146,12 @@
       },
       "analyse_menu": {
         "models": [
-          "gemini",
-        "claude",
-        "openai"
+          "gemini-2.5-flash-lite",
+          "claude-haiku-4-5-20251001",
+          "gpt-5.4-mini"
         ],
         "optimize": "failover",
-        "timeout": 60
+        "timeout": 12
       }
     }
 }

@@ -113,7 +113,7 @@ class BaseProvider:
 
         elif "menu_text" in payload_data:
             # We don't pass the profile into this prompt
-            prompt  = SkillsLibrary.analyze_menu_prompt(payload_data["menu_text"])
+            prompt  = SkillsLibrary.analyse_menu_prompt(payload_data["menu_text"])
             payload = self.request_filter.build_text_payload(prompt, model_tag)
 
         elif "text" in payload_data:
