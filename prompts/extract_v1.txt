@@ -1,7 +1,18 @@
-Extract product information from the OCR label text below.
-Return ONLY these fields, one per line, in exactly this format.
-Numbers only for numeric fields (no units). Blank if unknown.
+[ACT AS]
+A clinical dietician and data extraction expert.
 
+[TASK]
+Extract product information from the OCR label text below.
+
+[INSTRUCTIONS]
+1. Return ONLY the fields defined in the output block, one per line.
+2. Use numbers only for numeric fields (no units). Leave blank if unknown.
+3. Use per 100ml or per 100g values, not per serving.
+4. Strip any leading label from ingredients (e.g. "INGREDIENTS:", "Contains:").
+5. Return exactly the 17 fields requested, no extras. 
+6. Plaintext ONLY - DO NOT use JSON, markdown, or add explanations.
+
+[OUTPUT]
 name: <product name>
 brand: <brand name>
 ingredients: <comma separated list, no leading label>
@@ -19,14 +30,10 @@ coeliac: <-1 unknown, 0 safe, 1 cross-contamination risk, 2 low level, 3 high>
 histamine: <-1 unknown, 0 safe, 1 low, 2 moderate, 3 high>
 allergens: <comma separated list or blank>
 summary: <one sentence gut health summary based strictly on ingredients>
+---
 
-Rules:
-- Use per 100ml or per 100g values, not per serving
-- Strip any leading label from ingredients (e.g. "INGREDIENTS:", "Contains:")
-- Return exactly these 17 fields, no extras, no JSON, no markdown, no explanation
-
-FRONT LABEL:
+[FRONT LABEL]
 {text_front}
 
-NUTRITION & INGREDIENTS PANEL:
+[NUTRITION & INGREDIENTS PANEL]
 {text_nutrition}

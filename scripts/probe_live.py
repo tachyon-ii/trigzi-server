@@ -55,7 +55,6 @@ async def probe_provider(name: str, provider) -> ProviderStatus:
     status = await provider.probe()
     return status
 
-
 def print_status(status: ProviderStatus) -> None:
     icon    = "✅" if status.is_reachable else "❌"
     credit  = f"  credit_remaining={status.credit_remaining}" if status.credit_remaining is not None else ""
@@ -66,16 +65,16 @@ def print_status(status: ProviderStatus) -> None:
     print(f"     latency       : {status.latency_ms}ms")
     print(f"     default model : {valid}")
     print(f"     models found  : {len(status.available_models)}")
+    
+    # Show the complete list in the order provided by the backend
     if status.available_models:
-        for m in sorted(status.available_models)[:8]:
+        for m in status.available_models:
             print(f"       - {m}")
-        if len(status.available_models) > 8:
-            print(f"       ... and {len(status.available_models) - 8} more")
+ 
     if credit:
         print(f"     {credit.strip()}")
     if error:
         print(f"     {error.strip()}")
-
 
 async def main(targets: list[str]) -> None:
     print("\n── Live Provider Probe ─────────────────────────────────────")

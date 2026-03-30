@@ -1,0 +1,2609 @@
+# tarzan.py snapshot - 2026-03-30 13:27
+# root: /var/www/trigzi/core
+# files: 19
+
+===================
+#  analyser.py
+===================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  core/analyser.py
+#
+
+from typing import Optional
+import json
+
+from core.llm.router import router
+from core.llm.skills import SkillsLibrary
+from core.llm.config import config as llm_config
+
+
+async def analyse_product(
+    gtin:           str,
+    text_front:     str,
+    text_nutrition: str,
+) -> Optional[dict]:
+    if not text_front and not text_nutrition:
+        return None
+
+    combined = f"Front label:\n{text_front}\n\nNutrition/Ingredients:\n{text_nutrition}"
+    _cfg = llm_config.task_config("analyse_product")
+
+    try:
+        response = await router.analyze(
+            payload       = {"text": combined},
+            profile       = "",
+            model_strings = _cfg["models"],
+            optimize      = _cfg["optimize"],
+            timeout       = _cfg["timeout"],
+        )
+        
+        # Router now returns a raw string. Parse JSON here.
+        raw_result = response.get("result")
+        if not raw_result:
+            return None
+        return json.loads(raw_result)
+
+    except json.JSONDecodeError as e:
+        print(f"  [!] analyse_product JSON decode failed: {e}")
+        return None
+    except Exception as e:
+        print(f"  [!] analyse_product failed: {e}")
+        return None
+
+
+async def analyse_meal(image: str, profile: str) -> Optional[dict]:
+    if not image:
+        return None
+
+    _cfg = llm_config.task_config("analyse_meal")
+
+    try:
+        response = await router.analyze(
+            payload       = {"image_base64": image},
+            profile       = profile,
+            model_strings = _cfg["models"],
+            optimize      = _cfg["optimize"],
+            timeout       = _cfg["timeout"],
+        )
+        
+        # Router now returns a raw string. Parse JSON here.
+        raw_result = response.get("result")
+        if not raw_result:
+            return None
+        return json.loads(raw_result)
+
+    except json.JSONDecodeError as e:
+        print(f"  [!] analyse_meal JSON decode failed: {e}")
+        return None
+    except Exception as e:
+        print(f"  [!] analyse_meal failed: {e}")
+        return None
+
+
+async def analyse_menu(text: str) -> Optional[dict]:
+    """Analyse OCR-extracted menu text via rapid flat-text extraction."""
+    if not text:
+        return None
+
+    _cfg = llm_config.task_config("analyse_menu")
+
+    try:
+        response = await router.analyze(
+            payload       = {"menu_text": text},
+            profile       = "", # No profile needed for extraction
+            model_strings = _cfg["models"],
+            optimize      = _cfg["optimize"],
+            timeout       = _cfg["timeout"],
+        )
+        
+        raw_text = response.get("result", "")
+        
+        # Failsafe if the model somehow wrapped it in JSON despite instructions
+        if isinstance(raw_text, dict):
+            raw_text = json.dumps(raw_text)
+        else:
+            raw_text = str(raw_text)
+
+        # The Dumb Parser (Optimized: No Quote)
+        dishes = []
+        blocks = [b.strip() for b in raw_text.split("---") if b.strip()]
+        
+        for block in blocks:
+            dish_data = {
+                "name": "Unknown",
+                "listed_ingredients": [],
+                "suspected_ingredients": []
+            }
+            
+            for line in block.split('\n'):
+                line = line.strip()
+                if not line or ':' not in line: 
+                    continue
+                 
+                key, val = [part.strip() for part in line.split(':', 1)]
+                key = key.lower()
+                
+                if key == "dish": 
+                    dish_data["name"] = val
+                elif key == "listed": 
+                    dish_data["listed_ingredients"] = [i.strip() for i in val.split(',') if i.strip()]
+                elif key == "suspected": 
+                    dish_data["suspected_ingredients"] = [i.strip() for i in val.split(',') if i.strip()]
+
+            if dish_data["name"] != "Unknown":
+                dishes.append(dish_data)
+
+        return {"type": "menu", "items": dishes}
+
+    except Exception as e:
+        print(f"  [!] analyse_menu failed: {e}")
+        return None
+
+
+=======================
+#  data_manager.py
+=======================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  core/data_manager.py
+#
+#  Thin product lookup layer. Read-only access to the products table.
+#  All write operations (enrichment, analysis) are in enricher.py and analyser.py.
+#
+#  Cases:
+#    Case 1: Record in DB, enrichment_id set   → return immediately (enriched)
+#    Case 2: Record in DB, enrichment_id null  → caller streams enrichment
+#    Case 3: Not in DB                         → return None → 404
+#
+#  Debug flags:
+#    DEBUG_FORCE_NOT_FOUND=1   — always return None
+#    DEBUG_FORCE_UNENRICHED=1  — strip enrichment_id, simulate Case 2
+#
+
+import os
+from typing import Optional
+
+from utils.off_lookup import OFFLookup
+from utils.gtin import normalise
+
+DEBUG_FORCE_NOT_FOUND  = os.environ.get("DEBUG_FORCE_NOT_FOUND",  "0") == "1"
+DEBUG_FORCE_UNENRICHED = os.environ.get("DEBUG_FORCE_UNENRICHED", "0") == "1"
+
+_off = OFFLookup()
+
+
+def get_product(scanned_gtin: str) -> Optional[dict]:
+    if DEBUG_FORCE_NOT_FOUND:
+        print(f"  [DEBUG] FORCE_NOT_FOUND: {scanned_gtin}")
+        return None
+
+    gtin = normalise(scanned_gtin)
+    if not gtin:
+        return None
+
+    record = _off.get(gtin)
+    if not record:
+        return None
+
+    if DEBUG_FORCE_UNENRICHED:
+        record = dict(record)
+        record["_enrichment_llm"] = None
+        record["clinical_profile"] = None
+
+    return record
+
+
+def is_enriched(record: dict) -> bool:
+    return bool(record.get("_enrichment_llm"))
+
+
+=============
+#  db.py
+=============
+from __future__ import annotations
+#
+#  core/db.py
+#
+#  MariaDB connection pool and enrichment registry for Trigzi.
+#
+#  Usage:
+#      from core.db import get_conn, get_or_create_enrichment
+#
+#      with get_conn() as conn:
+#          with conn.cursor() as cur:
+#              cur.execute("SELECT data FROM products WHERE gtin = %s", (gtin,))
+#              row = cur.fetchone()
+#
+#      enrichment_id = get_or_create_enrichment(
+#          task        = "product",
+#          llm_model   = "gemini-2.5-flash",
+#          prompt_ver  = "extract_v2",
+#          prompt_text = prompt_string,
+#      )
+#
+
+import os
+import hashlib
+import pymysql
+import pymysql.cursors
+from dbutils.pooled_db import PooledDB
+from typing import Optional
+
+# --- Connection pool config ---
+
+_CONFIG = {
+    "host":        os.environ.get("DB_HOST", "localhost"),
+    "db":          os.environ.get("DB_NAME", "trigzi"),
+    "user":        os.environ.get("DB_USER", "trigzi"),
+    "passwd":      os.environ.get("DB_PASS", ""),
+    "charset":     "utf8mb4",
+    "cursorclass": pymysql.cursors.DictCursor,
+    "autocommit":  True,
+}
+
+_pool: Optional[PooledDB] = None
+
+
+def _get_pool() -> PooledDB:
+    global _pool
+    if _pool is None:
+        _pool = PooledDB(
+            creator        = pymysql,
+            mincached      = 2,
+            maxcached      = 8,
+            maxconnections = 20,
+            blocking       = True,
+            **_CONFIG,
+        )
+    return _pool
+
+
+def get_conn() -> pymysql.connections.Connection:
+    """
+    Return a pooled connection.
+    Use as a context manager — connection is returned to pool on exit.
+    """
+    return _get_pool().connection()
+
+
+def ping() -> bool:
+    """Quick connectivity check. Returns True if DB is reachable."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        return True
+    except Exception as e:
+        print(f"  [!] DB ping failed: {e}")
+        return False
+
+
+# --- Enrichment registry ---
+
+def get_or_create_enrichment(
+    task:        str,
+    llm_model:   str,
+    prompt_ver:  str,
+    prompt_text: str,
+) -> Optional[int]:
+    """
+    Look up or insert an enrichment row identified by (prompt_hash, llm_model).
+
+    The composite unique key ensures that the same prompt through a different
+    model gets its own row — prompt×model is the meaningful unit of enrichment
+    quality, not prompt alone.
+
+    Returns the enrichment id, or None on error.
+
+    Re-enrichment query pattern:
+        SELECT gtin FROM products
+        WHERE enrichment_id IN (
+            SELECT id FROM enrichments
+            WHERE prompt_ver != 'extract_v3'
+            OR llm_model NOT IN ('gemini-2.5-flash')
+        )
+    """
+    h = hashlib.sha256(prompt_text.encode()).hexdigest()[:8]
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT IGNORE INTO enrichments
+                        (task, llm_model, prompt_ver, prompt_hash, prompt_text)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (task, llm_model, prompt_ver, h, prompt_text))
+
+                cur.execute(
+                    "SELECT id FROM enrichments WHERE prompt_hash = %s AND llm_model = %s",
+                    (h, llm_model)
+                )
+                row = cur.fetchone()
+                return row["id"] if row else None
+    except Exception as e:
+        print(f"  [!] get_or_create_enrichment error: {e}")
+        return None
+
+
+===================
+#  enricher.py
+===================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  core/enricher.py
+#
+#  LLM enrichment pipeline for raw product records.
+#  Fully async — no _run() bridge needed.
+#
+#  Writes enrichment_id FK back to products so the exact prompt×model
+#  that produced each clinical profile is permanently recorded.
+#
+#  Routing (models, optimize, timeout) is read from the 'enrich' task
+#  in llm_providers.json via llm_config.task_config("enrich").
+#  No routing constants live in this file.
+#
+
+import os
+import json
+from typing import Optional
+
+from utils.off_lookup import OFFLookup
+from core.db import get_or_create_enrichment
+from core.telemetry import log_scan
+from core.llm.router import router
+from core.llm.skills import SkillsLibrary
+from core.llm.config import config as llm_config
+
+VALIDATE_JSONL = "/var/www/trigzi/logs/validate.jsonl"
+PROMPT_VER     = "enrich_v1"
+
+NON_FOOD_CATEGORIES = {
+    "Cleaning & Laundry",
+    "Home & Garden",
+    "Health & Beauty",
+    "Pet",
+    "Tobacco",
+}
+
+_off = OFFLookup()
+
+
+def _nop_profile() -> dict:
+    return {
+        "estimated_health_star": None,
+        "fodmap_rating":         -1,
+        "coeliac_rating":        -1,
+        "histamine_rating":      -1,
+        "allergen_warnings":     [],
+        "health_summary":        "Non-food item. No clinical gut health profile applies."
+    }
+
+
+def _queue_for_validation(record: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(VALIDATE_JSONL), exist_ok=True)
+        with open(VALIDATE_JSONL, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+    except Exception as e:
+        print(f"  [!] validate queue write failed: {e}")
+
+
+async def enrich(record: dict) -> dict:
+    """
+    Enrich a raw product record with a clinical profile.
+    Writes enrichment_id FK back to the products table.
+    """
+    enriched     = dict(record)
+    llm_model    = "NOP"
+    profile_data = None
+    prompt_text  = ""
+
+    if record.get("category") in NON_FOOD_CATEGORIES:
+        profile_data = _nop_profile()
+    else:
+        log_scan(
+            gtin   = record.get("gtin", ""),
+            source = record.get("_source_name", "off"),
+            text   = record.get("raw_ingredients", "")
+        )
+
+        prompt_text = SkillsLibrary.enrich_product_prompt(record)
+
+        _cfg = llm_config.task_config("enrich")
+
+        try:
+            response = await router.analyze(
+                payload       = {"product": record, "prompt": prompt_text},
+                profile       = "",
+                model_strings = _cfg["models"],
+                optimize      = _cfg["optimize"],
+                timeout       = _cfg["timeout"],
+            )
+            profile_data = response.get("result")
+            llm_model    = response.get("model", "router")
+        except Exception as e:
+            print(f"  [!] Enrichment failed: {e}")
+            llm_model = "FAILED"
+
+    if profile_data:
+        enriched["clinical_profile"] = profile_data
+        enriched["_enrichment_llm"]  = llm_model
+
+        enrichment_id = get_or_create_enrichment(
+            task        = "product",
+            llm_model   = llm_model,
+            prompt_ver  = PROMPT_VER,
+            prompt_text = prompt_text or "NOP",
+        )
+
+        _queue_for_validation(enriched)
+        _off.save(enriched, enrichment_id=enrichment_id)
+    else:
+        enriched["_enrichment_llm"] = "FAILED"
+        _off.save(enriched, enrichment_id=None)
+
+    return enriched
+
+
+====================
+#  telemetry.py
+====================
+#!/usr/bin/env python3
+from __future__ import annotations
+"""
+core/telemetry.py
+
+All telemetry logging and routes for Trigzi.
+
+Register in app.py:
+    from core.telemetry import telemetry_bp
+    app.register_blueprint(telemetry_bp)
+
+Logging helpers:
+    log_scan()        — OFF/Woolworths/Coles enrichment input
+    log_ocr_scan()    — dual-capture OCR scan input
+    log_unmatched()   — unmatched GTIN (product acquisition queue)
+
+Sort unmatched by frequency:
+    sort logs/unmatched.log | uniq -c | sort -rn | head -50
+"""
+
+import os
+import time
+from quart import Blueprint, request, jsonify
+
+BASE_DIR      = os.path.join(os.path.dirname(__file__), '..')
+SCANS_DIR     = os.path.join(BASE_DIR, 'logs', 'scans')
+UNMATCHED_LOG = os.path.join(BASE_DIR, 'logs', 'unmatched.log')
+
+telemetry_bp = Blueprint('telemetry', __name__)
+
+
+# --- Internal helpers ---
+
+def _ts() -> str:
+    return str(int(time.time()))
+
+
+def _write_scan(filename: str, content: str) -> None:
+    os.makedirs(SCANS_DIR, exist_ok=True)
+    try:
+        with open(os.path.join(SCANS_DIR, filename), 'w', encoding='utf-8') as f:
+            f.write(content)
+    except OSError as e:
+        print(f"  [!] telemetry write failed: {e}")
+
+
+# --- Public logging API ---
+
+def log_scan(gtin: str, source: str, text: str) -> None:
+    """Log an OFF/Woolworths/Coles enrichment input."""
+    _write_scan(f"{_ts()}_{gtin}_enrich.txt", (
+        f"GTIN: {gtin}\n"
+        f"TIMESTAMP: {time.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+        f"SOURCE: {source}\n"
+        f"\n"
+        f"=== INGREDIENTS ===\n"
+        f"{text}\n"
+    ))
+
+
+def log_ocr_scan(gtin: str, text_front: str, text_nutrition: str) -> None:
+    """Log a dual-capture OCR scan input."""
+    _write_scan(f"{_ts()}_{gtin}_ocr.txt", (
+        f"GTIN: {gtin}\n"
+        f"TIMESTAMP: {time.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+        f"SOURCE: ocr\n"
+        f"\n"
+        f"=== FRONT OF PACKAGE ===\n"
+        f"{text_front}\n"
+        f"\n"
+        f"=== NUTRITION & INGREDIENTS ===\n"
+        f"{text_nutrition}\n"
+    ))
+
+def log_menu_scan(text: str) -> str:
+    """Log a raw OCR menu scan and return the filename for reference."""
+    filename = f"{_ts()}_menu_scan.txt"
+    _write_scan(filename, (
+        f"TIMESTAMP: {time.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+        f"SOURCE: menu_ocr\n"
+        f"\n"
+        f"=== MENU TEXT ===\n"
+        f"{text}\n"
+    ))
+    return filename
+
+def log_unmatched(gtin: str) -> None:
+    """Log an unmatched GTIN to the product acquisition queue."""
+    try:
+        os.makedirs(os.path.dirname(UNMATCHED_LOG), exist_ok=True)
+        with open(UNMATCHED_LOG, 'a', encoding='utf-8') as f:
+            f.write(f"{gtin}\n")
+    except OSError as e:
+        print(f"  [!] unmatched log write failed: {e}")
+
+
+# --- Routes ---
+
+@telemetry_bp.route('/api/v1/telemetry/unmatched', methods=['POST'])
+@telemetry_bp.route('/api/v1/telemetry/unmatched/gtin', methods=['POST'])
+@telemetry_bp.route('/api/v1/telemetry/unmatched/<gtin>', methods=['GET'])
+async def telemetry_unmatched(gtin=None):
+    if gtin is None:
+        data = await request.get_json(silent=True) or {}
+        gtin = data.get('term', '').strip()
+    if gtin:
+        log_unmatched(gtin)
+        print(f"[{time.strftime('%H:%M:%S')}] Unmatched: {gtin}")
+    return jsonify({"status": "logged"}), 200
+
+
+=====================
+#  llm/config.py
+=====================
+# core/llm/config.py
+"""
+LLM provider configuration manager.
+
+Loads llm_providers.json once at server startup and vends model
+configuration to the router and providers. Replaces all hardcoded model
+strings — adding or updating a model requires only a JSON edit.
+
+Thread-safe singleton: the config object is initialised exactly once
+using a threading.Lock, guaranteeing zero race conditions during
+concurrent request handling and zero disk I/O latency after startup.
+
+The module-level `config` instance is the intended import target:
+
+    from core.llm.config import config
+
+    primary = config.primary_model("gemini")      # "gemini-2.5-flash"
+    chain   = config.hierarchy("gemini")          # ["gemini-2.5-flash", ...]
+    cost    = config.estimate_cost(              
+                  "gemini-2.5-flash",
+                  input_tokens=800,
+                  output_tokens=200
+              )
+
+JSON location: core/llm/llm_providers.json
+(same directory as this file — consistent with Swift's Resources/ pattern)
+"""
+
+import json
+from typing import Optional, List
+import os
+import threading
+
+
+class LLMProviderConfig:
+    """
+    Thread-safe singleton config manager.
+
+    Do not instantiate directly — use the module-level `config` instance.
+    """
+
+    _instance = None
+    _lock     = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._load_config()
+        return cls._instance
+
+    # ------------------------------------------------------------------ #
+    # Initialisation                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _load_config(self) -> None:
+        """
+        Load llm_providers.json from the same directory as this file.
+
+        Falls back to a minimal inline config if the file is missing so
+        the server degrades gracefully rather than crashing on startup.
+        The fallback models match the current llm_providers.json defaults
+        so behaviour is consistent.
+        """
+        config_path = os.path.join(os.path.dirname(__file__), "llm_providers.json")
+
+        # Minimal fallback — mirrors hierarchy[0] from llm_providers.json
+        _fallback = {
+            "providers": {
+                "gemini": {
+                    "defaultModel": "gemini-2.5-flash",
+                    "models": {},
+                    "hierarchy": ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+                },
+                "claude": {
+                    "defaultModel": "claude-sonnet-4-6",
+                    "models": {},
+                    "hierarchy": ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+                },
+                "openai": {
+                    "defaultModel": "gpt-4o",
+                    "models": {},
+                    "hierarchy": ["gpt-4o", "gpt-4.1-mini"]
+                }
+            }
+        }
+
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                self._config = json.load(f)
+            provider_count = len(self._config.get("providers", {}))
+            print(f"✅ LLMProviderConfig: loaded {provider_count} providers "
+                  f"from {config_path}")
+        else:
+            print(f"⚠️  LLMProviderConfig: {config_path} not found — "
+                  f"using built-in fallback config.")
+            self._config = _fallback
+
+    # ------------------------------------------------------------------ #
+    # Model resolution                                                     #
+    # ------------------------------------------------------------------ #
+
+    def resolve(self, model_tag: Optional[str], provider: str) -> str:
+        """
+        Return the full model string to use on the wire.
+
+        Resolution order:
+          1. None / empty → provider's defaultModel
+          2. Tag equals provider name → provider's defaultModel
+          3. Tag is a known model in the catalogue → return as-is
+          4. Unknown tag → pass through (lets the API reject if invalid;
+             allows new models to work before llm_providers.json is updated)
+
+        Args:
+            model_tag: Model string from the request, or None.
+            provider:  Provider name (case-insensitive: "gemini", "claude", etc.)
+
+        Returns:
+            Full model string ready to embed in the API payload.
+        """
+        entry = self._config.get("providers", {}).get(provider.lower(), {})
+        default = entry.get("defaultModel", provider)
+
+        if not model_tag:
+            return default
+
+        if model_tag.lower() == provider.lower():
+            return default
+
+        # Known in catalogue — return verbatim
+        if model_tag in entry.get("models", {}):
+            return model_tag
+
+        # Unknown — pass through and let the API surface any error
+        return model_tag
+
+    # ------------------------------------------------------------------ #
+    # Hierarchy                                                            #
+    # ------------------------------------------------------------------ #
+
+    def hierarchy(self, provider: str) -> List[str]:
+        """
+        Return the ordered model list for automatic tier selection.
+
+        hierarchy[0] = primary   (highest capability / default)
+        hierarchy[1] = secondary (first fallback)
+        hierarchy[2] = tertiary  (last resort)
+
+        Args:
+            provider: Provider name (case-insensitive).
+
+        Returns:
+            List of model strings in priority order. Empty list if the
+            provider is not in the config.
+        """
+        return (self._config
+                .get("providers", {})
+                .get(provider.lower(), {})
+                .get("hierarchy", []))
+
+    def primary_model(self, provider: str) -> str:
+        """Primary model (hierarchy index 0) for a provider."""
+        h = self.hierarchy(provider)
+        if h:
+            return h[0]
+        return (self._config
+                .get("providers", {})
+                .get(provider.lower(), {})
+                .get("defaultModel", provider))
+
+    def secondary_model(self, provider: str) -> Optional[str]:
+        """Secondary model (hierarchy index 1), or None if not configured."""
+        h = self.hierarchy(provider)
+        return h[1] if len(h) > 1 else None
+
+    def tertiary_model(self, provider: str) -> Optional[str]:
+        """Tertiary model (hierarchy index 2), or None if not configured."""
+        h = self.hierarchy(provider)
+        return h[2] if len(h) > 2 else None
+
+    # ------------------------------------------------------------------ #
+    # Cost estimation                                                      #
+    # ------------------------------------------------------------------ #
+
+    def estimate_cost(self, model: str, input_tokens: int,
+                      output_tokens: int) -> Optional[float]:
+        """
+        Estimate call cost in USD using per-million-token rates from config.
+
+        Args:
+            model:         Full model string (e.g. "gemini-2.5-flash").
+            input_tokens:  Number of input/prompt tokens consumed.
+            output_tokens: Number of output/completion tokens produced.
+
+        Returns:
+            Estimated cost in USD, or None if the model is not in the
+            catalogue (e.g. a pass-through unknown model).
+        """
+        for entry in self._config.get("providers", {}).values():
+            model_cfg = entry.get("models", {}).get(model)
+            if model_cfg:
+                input_cost  = (input_tokens  / 1_000_000) * model_cfg.get("input_per_million",  0)
+                output_cost = (output_tokens / 1_000_000) * model_cfg.get("output_per_million", 0)
+                return round(input_cost + output_cost, 8)
+        return None
+
+    def supports_vision(self, model: str) -> bool:
+        """
+        Return True if the model supports image/vision input.
+
+        Defaults to False for unknown models — conservative is safer
+        than optimistic when deciding whether to encode and send an image.
+
+        Args:
+            model: Full model string.
+        """
+        for entry in self._config.get("providers", {}).values():
+            model_cfg = entry.get("models", {}).get(model)
+            if model_cfg is not None:
+                return bool(model_cfg.get("vision", False))
+        return False
+
+    def cheapest_model(self, provider: str) -> Optional[str]:
+        """
+        Return the cheapest model in a provider's hierarchy by output cost.
+
+        Output token cost is used as the primary signal because it dominates
+        total cost for generation-heavy tasks like food analysis.
+
+        Args:
+            provider: Provider name (case-insensitive).
+
+        Returns:
+            Model string of the cheapest model, or None if the provider
+            has no costed models in the catalogue.
+        """
+        entry = self._config.get("providers", {}).get(provider.lower(), {})
+        models = entry.get("models", {})
+        hierarchy = entry.get("hierarchy", [])
+
+        candidates = [
+            (tag, models[tag].get("output_per_million", float("inf")))
+            for tag in hierarchy
+            if tag in models
+        ]
+
+        if not candidates:
+            return None
+
+        return min(candidates, key=lambda x: x[1])[0]
+
+    # ------------------------------------------------------------------ #
+    # Introspection                                                        #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def all_provider_names(self) -> List[str]:
+        """Sorted list of all configured provider names."""
+        return sorted(self._config.get("providers", {}).keys())
+
+    # ------------------------------------------------------------------ #
+    # Task routing config                                                  #
+    # ------------------------------------------------------------------ #
+ 
+    _ROUTING_DEFAULTS = {
+        "models":   ["gemini", "claude", "openai"],
+        "optimize": "failover",
+        "timeout":  60.0,
+    }
+ 
+    def task_config(self, task: str) -> dict:
+        """
+        Return routing config for a named task.
+ 
+        Reads from the 'routing' section of llm_providers.json.
+        Falls back to sensible defaults if the task or section is absent.
+ 
+        Usage:
+            cfg = config.task_config("enrich")
+            response = await router.analyze(
+                payload       = ...,
+                profile       = ...,
+                model_strings = cfg["models"],
+                optimize      = cfg["optimize"],
+                timeout       = cfg["timeout"],
+            )
+        """
+        routing = self._config.get("routing", {})
+        task_cfg = routing.get(task, {})
+        return {
+            "models":   task_cfg.get("models",   self._ROUTING_DEFAULTS["models"]),
+            "optimize": task_cfg.get("optimize", self._ROUTING_DEFAULTS["optimize"]),
+            "timeout":  task_cfg.get("timeout",  self._ROUTING_DEFAULTS["timeout"]),
+        }
+
+
+# Module-level singleton — import this, not the class.
+config = LLMProviderConfig()
+
+
+=====================
+#  llm/errors.py
+=====================
+# core/llm/errors.py
+"""
+Normalised LLM error contract.
+
+All provider-specific HTTP errors are translated into LLMError subclasses
+before leaving the provider layer. The router and callers never see a
+GeminiError, ClaudeError, or OpenAIError — only these cases.
+
+This mirrors the LLMError enum in LLMConnector.swift, using @classmethod
+factories to replicate Swift's enum associated values pattern in Python.
+
+Usage:
+    raise LLMError.rate_limited("Gemini", retry_after=30)
+    raise LLMError.decode_failed("Claude", raw=response_text)
+
+    try:
+        ...
+    except LLMError as e:
+        if e.is_failoverable:
+            # try next provider
+        else:
+            raise
+"""
+
+
+class LLMError(Exception):
+    """
+    Base exception for all normalised LLM errors.
+
+    Attributes:
+        provider (str):          The provider name that raised the error.
+        is_failoverable (bool):  True if the router should try the next
+                                 provider in the failover chain. False for
+                                 errors that indicate a bad request or
+                                 misconfiguration that retrying won't fix.
+        raw_response (str|None): The raw response body for decode failures.
+                                 None for all other error types.
+    """
+
+    def __init__(self, message: str, provider: str = "Unknown",
+                 is_failoverable: bool = True):
+        super().__init__(message)
+        self.provider        = provider
+        self.is_failoverable = is_failoverable
+        self.raw_response    = None   # populated by decode_failed only
+
+    # ------------------------------------------------------------------ #
+    # Failoverable errors — router will try the next provider             #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def rate_limited(cls, provider: str, retry_after: int = None) -> "LLMError":
+        """Provider returned HTTP 429 or equivalent quota exhaustion."""
+        suffix = f" Retry after {retry_after}s." if retry_after else ""
+        return cls(f"{provider} rate limited.{suffix}",
+                   provider=provider, is_failoverable=True)
+
+    @classmethod
+    def server_error(cls, provider: str, status_code: int,
+                     message: str) -> "LLMError":
+        """Provider returned HTTP 5xx."""
+        return cls(f"{provider} server error {status_code}: {message}",
+                   provider=provider, is_failoverable=True)
+
+    @classmethod
+    def network_timeout(cls, provider: str) -> "LLMError":
+        """Request to provider timed out."""
+        return cls(f"{provider} timed out.",
+                   provider=provider, is_failoverable=True)
+
+    @classmethod
+    def network_failure(cls, provider: str, underlying: str) -> "LLMError":
+        """Network-level failure (DNS, connection refused, etc.)."""
+        return cls(f"{provider} network failure: {underlying}",
+                   provider=provider, is_failoverable=True)
+
+    @classmethod
+    def decode_failed(cls, provider: str, raw: str = None) -> "LLMError":
+        """
+        Provider returned a response that could not be parsed as AnalysisResult.
+
+        The raw response string is attached to the instance for debugging
+        but intentionally excluded from the exception message to prevent
+        large payloads bloating log aggregators.
+        """
+        err = cls(f"{provider} returned an unreadable response.",
+                  provider=provider, is_failoverable=True)
+        err.raw_response = raw
+        return err
+
+    @classmethod
+    def empty_response(cls, provider: str) -> "LLMError":
+        """Provider returned a structurally valid response with no content."""
+        return cls(f"{provider} returned an empty response.",
+                   provider=provider, is_failoverable=True)
+
+    # ------------------------------------------------------------------ #
+    # Non-failoverable errors — retrying will not help                    #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def invalid_request(cls, reason: str) -> "LLMError":
+        """The request payload is malformed. Do not retry."""
+        return cls(f"Invalid request: {reason}",
+                   provider="Unknown", is_failoverable=False)
+
+    @classmethod
+    def encoding_failed(cls, reason: str) -> "LLMError":
+        """Image or payload encoding failed before the request was sent."""
+        return cls(f"Encoding failed: {reason}",
+                   provider="Unknown", is_failoverable=False)
+
+    @classmethod
+    def all_providers_failed(cls, providers: list) -> "LLMError":
+        """Every provider in the failover chain was exhausted."""
+        return cls(f"All providers failed: {', '.join(providers)}",
+                   provider="Router", is_failoverable=False)
+
+    @classmethod
+    def no_providers_configured(cls) -> "LLMError":
+        """The request specified no providers."""
+        return cls("No LLM providers configured.",
+                   provider="Router", is_failoverable=False)
+
+    @classmethod
+    def unknown_provider(cls, provider: str) -> "LLMError":
+        """The requested provider name is not in the registry."""
+        return cls(f"Unknown provider: {provider}",
+                   provider=provider, is_failoverable=False)
+
+
+
+==============================
+#  llm/llm_providers.json
+==============================
+{
+  "providers": {
+    "gemini": {
+      "defaultModel": "gemini-2.5-flash",
+        "models": {
+          "gemini-2.5-flash-lite": {
+            "input_per_million":  0.10,
+            "output_per_million": 0.40,
+            "vision": true
+          },
+          "gemini-2.5-flash": {
+            "input_per_million":  0.30,
+            "output_per_million": 1.00,
+            "vision": true
+          },
+          "gemini-2.5-pro": {
+            "input_per_million":  1.25,
+            "output_per_million": 5.00,
+            "vision": true
+          },
+          "gemini-3-flash-preview": {
+            "input_per_million":  0.30,
+            "output_per_million": 1.00,
+            "vision": true
+          },
+          "gemini-3.1-flash-lite-preview": {
+            "input_per_million":  0.10,
+            "output_per_million": 0.40,
+            "vision": true
+          },
+          "gemini-3.1-flash-image-preview": {
+            "input_per_million":  0.30,
+            "output_per_million": 1.00,
+            "vision": true
+          },
+          "gemini-3.1-pro-preview": {
+            "input_per_million":  1.25,
+            "output_per_million": 5.00,
+            "vision": true
+          }
+        },
+        "hierarchy": [
+          "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro"
+        ]
+    },
+      "claude": {
+        "defaultModel": "claude-sonnet-4-6",
+        "models": {
+          "claude-haiku-4-5-20251001": {
+            "input_per_million":  0.80,
+            "output_per_million": 4.00,
+            "vision": true
+          },
+          "claude-sonnet-4-5": {
+            "input_per_million":  3.00,
+            "output_per_million": 15.00,
+            "vision": true
+          },
+          "claude-sonnet-4-6": {
+            "input_per_million":  3.00,
+            "output_per_million": 15.00,
+            "vision": true
+          },
+          "claude-opus-4-5": {
+            "input_per_million": 15.00,
+            "output_per_million": 75.00,
+            "vision": true
+          }
+        },
+        "hierarchy": [
+          "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
+        "claude-opus-4-5"
+        ]
+      },
+      "openai": {
+        "defaultModel": "gpt-4o",
+        "models": {
+          "gpt-4o-mini": {
+            "input_per_million":  0.15,
+            "output_per_million": 0.60,
+            "vision": true
+          },
+          "gpt-4o": {
+            "input_per_million":  2.50,
+            "output_per_million": 10.00,
+            "vision": true
+          },
+          "gpt-4.1": {
+            "input_per_million":  2.00,
+            "output_per_million": 8.00,
+            "vision": true
+          },
+          "gpt-4.1-mini": {
+            "input_per_million":  0.40,
+            "output_per_million": 1.60,
+            "vision": true
+          },
+          "o3": {
+            "input_per_million": 10.00,
+            "output_per_million": 40.00,
+            "vision": false
+          },
+          "o4-mini": {
+            "input_per_million":  1.10,
+            "output_per_million": 4.40,
+            "vision": true
+          }
+        },
+        "hierarchy": [
+          "gpt-4o",
+        "gpt-4.1-mini",
+        "gpt-4.1"
+        ]
+      }
+  },
+    "routing": {
+      "enrich": {
+        "models": [
+          "gemini",
+        "claude",
+        "openai"
+        ],
+        "optimize": "failover",
+        "timeout": 60
+      },
+      "analyse_product": {
+        "models": [
+          "gemini",
+        "claude",
+        "openai"
+        ],
+        "optimize": "failover",
+        "timeout": 60
+      },
+      "analyse_meal": {
+        "models": [
+          "gemini",
+        "claude",
+        "openai"
+        ],
+        "optimize": "failover",
+        "timeout": 60
+      },
+      "analyse_menu": {
+        "models": [
+          "gemini",
+        "claude",
+        "openai"
+        ],
+        "optimize": "failover",
+        "timeout": 60
+      }
+    }
+}
+
+
+
+====================
+#  llm/probe.py
+====================
+# core/llm/probe.py
+"""
+Provider health-check and introspection layer.
+
+Implements probe() for each provider — a lightweight operation that:
+  1. Hits the provider's model-list endpoint to confirm reachability
+  2. Measures round-trip latency
+  3. Returns the list of available models
+  4. Validates that the configured default model is in that list
+  5. Reports remaining API credit where available via response headers
+
+Credit remaining is also updated on every normal analyze() call via
+BaseProvider._update_credit_from_headers() — probe() initialises the
+field but does not block on it.
+
+ProbeScheduler runs probe() for all registered providers:
+  - Once on startup (before the first request is served)
+  - Periodically on a configurable interval (default: 5 minutes)
+
+Usage:
+    from core.llm.probe import scheduler
+
+    await scheduler.start()            # call once at Flask app startup
+    status = scheduler.status("gemini")
+    all    = scheduler.all_status()
+"""
+
+import asyncio
+import time
+import aiohttp
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+
+
+# MARK: - ProviderStatus
+
+@dataclass
+class ProviderStatus:
+    """
+    Snapshot of a provider's health at a point in time.
+    Produced by probe() and cached by ProbeScheduler.
+    """
+    provider:              str
+    is_reachable:          bool
+    latency_ms:            int
+    available_models:      List[str]
+    default_model_valid:   bool           # is configured default in available_models?
+    credit_remaining:      Optional[int]  # from response headers; None if not exposed
+    probed_at:             datetime       = field(default_factory=lambda: datetime.now(timezone.utc))
+    error:                 Optional[str]  = None
+
+    def __str__(self) -> str:
+        status = "✅" if self.is_reachable else "❌"
+        credit = f"  credit={self.credit_remaining}" if self.credit_remaining is not None else ""
+        valid  = "✓" if self.default_model_valid else "✗ DEFAULT MODEL NOT FOUND"
+        return (
+            f"{status} {self.provider} | {self.latency_ms}ms | "
+            f"{len(self.available_models)} models | default {valid}{credit}"
+        )
+
+
+# MARK: - Probe mixin (added to BaseProvider)
+
+class ProbeMixin:
+    """
+    Mixin that adds probe() to any provider.
+    Concrete providers must implement _models_url() and _model_name_key().
+    """
+
+    # Override in each provider
+    def _models_url(self) -> str:
+        raise NotImplementedError
+
+    def _models_request_kwargs(self) -> dict:
+        """Returns aiohttp request kwargs (headers, params, etc.)"""
+        return {}
+
+    def _model_name_key(self) -> str:
+        """JSON key path to extract model name from list response."""
+        return "name"   # override per provider if needed
+
+    async def probe(self, timeout_s: float = 10.0) -> "ProviderStatus":
+        """
+        Probe this provider for reachability, latency, and model list.
+        """
+        url     = self._models_url()
+        kwargs  = self._models_request_kwargs()
+        timeout = aiohttp.ClientTimeout(total=timeout_s)
+        start   = time.time()
+
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, **kwargs) as response:
+                    latency_ms = int((time.time() - start) * 1000)
+
+                    if response.status != 200:
+                        return ProviderStatus(
+                            provider            = self.provider_name,
+                            is_reachable        = False,
+                            latency_ms          = latency_ms,
+                            available_models    = [],
+                            default_model_valid = False,
+                            credit_remaining    = None,
+                            error               = f"HTTP {response.status}"
+                        )
+
+                    data             = await response.json()
+                    available        = self._extract_model_names(data)
+                    default          = self.default_model
+                    default_valid    = any(
+                        default in m or m in default
+                        for m in available
+                    ) if available else False
+                    credit           = self._extract_credit(response.headers)
+
+                    return ProviderStatus(
+                        provider            = self.provider_name,
+                        is_reachable        = True,
+                        latency_ms          = latency_ms,
+                        available_models    = available,
+                        default_model_valid = default_valid,
+                        credit_remaining    = credit,
+                    )
+
+        except asyncio.TimeoutError:
+            return ProviderStatus(
+                provider            = self.provider_name,
+                is_reachable        = False,
+                latency_ms          = int((time.time() - start) * 1000),
+                available_models    = [],
+                default_model_valid = False,
+                credit_remaining    = None,
+                error               = "Timeout"
+            )
+        except Exception as e:
+            return ProviderStatus(
+                provider            = self.provider_name,
+                is_reachable        = False,
+                latency_ms          = int((time.time() - start) * 1000),
+                available_models    = [],
+                default_model_valid = False,
+                credit_remaining    = None,
+                error               = str(e)
+            )
+
+    def _extract_model_names(self, data: dict) -> List[str]:
+        """
+        Extract model name strings from the provider's list response.
+        Override per provider if the response shape differs.
+        """
+        models = data.get("models", data.get("data", []))
+        key    = self._model_name_key()
+        names  = []
+        for m in models:
+            name = m.get(key, "")
+            # Gemini prefixes with "models/" — strip it
+            if "/" in name:
+                name = name.split("/")[-1]
+            if name:
+                names.append(name)
+        return sorted(names)
+
+    def _extract_credit(self, headers) -> Optional[int]:
+        """
+        Extract remaining API credit/quota from response headers.
+        Each provider uses a different header name.
+        """
+        # Try common header names in priority order
+        for key in [
+            "x-ratelimit-remaining-requests",   # OpenAI
+            "anthropic-ratelimit-requests-remaining",  # Claude
+            "x-goog-quota-remaining",            # Gemini
+        ]:
+            val = headers.get(key)
+            if val is not None:
+                try:
+                    return int(val)
+                except ValueError:
+                    pass
+        return None
+
+
+# MARK: - Provider-specific probe config
+# These are added to each provider class as small mixins
+
+class GeminiProbeMixin(ProbeMixin):
+    def _models_url(self) -> str:
+        import os
+        key = os.environ.get("GEMINI_API_KEY", "")
+        return f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+
+    def _model_name_key(self) -> str:
+        return "name"   # Gemini returns {"name": "models/gemini-2.5-flash", ...}
+
+
+class ClaudeProbeMixin(ProbeMixin):
+    def _models_url(self) -> str:
+        return "https://api.anthropic.com/v1/models"
+
+    def _models_request_kwargs(self) -> dict:
+        import os
+        return {"headers": {
+            "x-api-key":         os.environ.get("CLAUDE_API_KEY", ""),
+            "anthropic-version": "2023-06-01"
+        }}
+
+    def _model_name_key(self) -> str:
+        return "id"   # Claude returns {"id": "claude-sonnet-4-6", ...}
+
+
+class OpenAIProbeMixin(ProbeMixin):
+    def _models_url(self) -> str:
+        return "https://api.openai.com/v1/models"
+
+    def _models_request_kwargs(self) -> dict:
+        import os
+        return {"headers": {
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}"
+        }}
+
+    def _model_name_key(self) -> str:
+        return "id"   # OpenAI returns {"id": "gpt-4o", ...}
+
+    def _extract_model_names(self, data: dict) -> list:
+        import datetime
+        models = data.get("data", [])
+        
+        # Sort by the 'created' unix timestamp, descending (newest first)
+        models.sort(key=lambda x: x.get("created", 0), reverse=True)
+        
+        names = []
+        for m in models:
+            name = m.get("id", "")
+            ts = m.get("created", 0)
+            # Convert unix timestamp to YYYY-MM-DD
+            date_str = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d') if ts else "unknown"
+            
+            # Pad the name to align the dates neatly in the terminal
+            names.append(f"{name:<38} [{date_str}]")
+            
+        return names
+
+# MARK: - ProbeScheduler
+
+class ProbeScheduler:
+    """
+    Runs probe() for all registered providers on startup and periodically.
+
+    Usage:
+        scheduler = ProbeScheduler(registry, interval_s=300)
+        await scheduler.start()          # at Flask app startup
+        status = scheduler.status("gemini")
+    """
+
+    def __init__(self, registry: Dict, interval_s: float = 300.0):
+        self._registry  = registry    # same dict as LLMRouter.registry
+        self._interval  = interval_s
+        self._cache:    Dict[str, ProviderStatus] = {}
+        self._task:     Optional[asyncio.Task]    = None
+
+    async def start(self) -> None:
+        """Run initial probe for all providers, then schedule periodic refresh."""
+        await self._probe_all()
+        self._task = asyncio.create_task(self._periodic_loop())
+        print(f"🔍 ProbeScheduler started (interval={self._interval}s)")
+
+    def stop(self) -> None:
+        """Cancel the periodic refresh task."""
+        if self._task:
+            self._task.cancel()
+
+    def status(self, provider: str) -> Optional[ProviderStatus]:
+        """Last known status for a provider. None if not yet probed."""
+        return self._cache.get(provider.lower())
+
+    def all_status(self) -> Dict[str, ProviderStatus]:
+        """Full status snapshot for all providers."""
+        return dict(self._cache)
+
+    def print_summary(self) -> None:
+        """Print a human-readable status summary to stdout."""
+        print("\n── Provider Status ─────────────────────────────────")
+        for status in self._cache.values():
+            print(f"  {status}")
+        print()
+
+    # MARK: - Private
+
+    async def _probe_all(self) -> None:
+        tasks = []
+        for name, provider in self._registry.items():
+            if isinstance(provider, ProbeMixin):
+                tasks.append(self._probe_one(name, provider))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _probe_one(self, name: str, provider: ProbeMixin) -> None:
+        status = await provider.probe()
+        self._cache[name.lower()] = status
+        print(f"  {status}")
+
+    async def _periodic_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._interval)
+            print("🔄 ProbeScheduler: refreshing provider status...")
+            await self._probe_all()
+
+
+# Module-level singleton — wired to LLMRouter.registry at startup
+# Initialised lazily so import doesn't trigger network calls
+scheduler: Optional[ProbeScheduler] = None
+
+
+def init_scheduler(registry: Dict, interval_s: float = 300.0) -> ProbeScheduler:
+    """
+    Initialise the module-level scheduler with the router's registry.
+    Call once at Flask app startup before awaiting scheduler.start().
+
+        from core.llm.probe import init_scheduler, scheduler
+        init_scheduler(router.registry)
+        await scheduler.start()
+    """
+    global scheduler
+    scheduler = ProbeScheduler(registry, interval_s)
+    return scheduler
+
+
+=====================
+#  llm/router.py
+=====================
+# core/llm/router.py
+import asyncio
+import os
+import uuid
+import random
+import logging
+from datetime import datetime
+from typing import List, Dict, Any
+
+from .errors import LLMError
+from .config import config
+from .providers.gemini import GeminiProvider
+from .providers.claude import ClaudeProvider
+from .providers.openai import OpenAIProvider
+
+_RESPONSES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'logs', 'llm_responses')
+
+
+class LLMRouter:
+
+    def __init__(self):
+        self.registry = {
+            "gemini": GeminiProvider(),
+            "claude": ClaudeProvider(),
+            "openai": OpenAIProvider()
+        }
+        self._latency_cache: Dict[str, Dict[str, Any]] = {}
+
+    # MARK: - Public API
+
+    async def analyze(
+        self,
+        payload: Dict[str, Any],
+        profile: str,
+        model_strings: List[str],
+        optimize: str = "accuracy",
+        timeout: float = 30.0
+    ) -> Dict[str, Any]:
+
+        if not model_strings:
+            raise LLMError.no_providers_configured()
+
+        mode       = self._resolve_mode(model_strings, optimize)
+        session_id = str(uuid.uuid4())
+
+        if mode == "direct":
+            return await self._execute_direct(payload, profile, model_strings[0], session_id, timeout)
+        elif mode == "race":
+            return await self._execute_race(payload, profile, model_strings, session_id, timeout)
+        elif mode == "failover":
+             return await self._execute_failover(payload, profile, model_strings, session_id, timeout)
+        elif mode == "ab":
+            return await self._execute_ab(payload, profile, model_strings, session_id, timeout)
+        elif mode == "cost":
+            return await self._execute_cost(payload, profile, model_strings, session_id, timeout)
+
+        raise LLMError.invalid_request(f"Unknown routing mode: {mode}")
+
+    # MARK: - Mode resolution
+
+    def _resolve_mode(self, models: List[str], optimize: str) -> str:
+        if len(models) == 1:
+            return "direct"
+        if optimize == "speed":
+            return "race"
+        if optimize == "accuracy":
+            return "ab"
+        if optimize == "cost":
+            return "cost"
+        return "failover"
+
+    # MARK: - Execution engines
+
+    async def _execute_direct(self, payload, profile, model_str, session_id, timeout) -> Dict[str, Any]:
+        provider_key, model_tag = self._parse_model_string(model_str)
+        provider = self.registry.get(provider_key)
+
+        if not provider:
+            raise LLMError.unknown_provider(provider_key)
+
+        resolved_tag = config.resolve(model_tag, provider_key)
+        
+        # LOGGING INJECTION: Watch the handoff instantly
+        logging.info(f"➡️ Routing request to {provider_key.upper()} ({resolved_tag})...")
+
+        try:
+            response = await provider.analyze(payload, profile, resolved_tag, timeout)
+            response['payload'] = payload  
+            self._record_call(response, session_id, success=True)
+            self._update_latency(resolved_tag, response["latency_ms"])
+            
+            logging.info(f"✅ {provider_key.upper()} succeeded in {response['latency_ms']}ms")
+            return response
+            
+        except BaseException as e:
+            # THE FIX: BaseException catches CancelledError (Nginx dropping the connection)
+            logging.error(f"❌ {provider_key.upper()} halted: {type(e).__name__} - {str(e)}")
+            fail_resp = {
+                'provider': provider_key,
+                'model': resolved_tag,
+                'latency_ms': -1,
+                'payload': payload,
+                'raw_json': f"CRASH/TIMEOUT/CANCELLED: {type(e).__name__} - {str(e)}"
+            }
+            self._record_call(fail_resp, session_id, success=False)
+            raise e
+
+    async def _execute_race(self, payload, profile, models, session_id, timeout) -> Dict[str, Any]:
+        tasks = [
+            asyncio.create_task(self._execute_direct(payload, profile, m, session_id, timeout))
+            for m in models
+        ]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+        for p in pending:
+            p.cancel()
+
+        for task in done:
+            try:
+                winner = task.result()
+                return winner
+            except Exception as e:
+                logging.warning(f"⚠️ Racer failed: {e}")
+
+        raise LLMError.all_providers_failed(models)
+
+    async def _execute_failover(self, payload, profile, models, session_id, timeout) -> Dict[str, Any]:
+        is_fallback = False
+
+        for m in models:
+            try:
+                response = await self._execute_direct(payload, profile, m, session_id, timeout)
+                if is_fallback:
+                    response["was_fallback"] = True
+                    logging.info(f"⚡️ Failover succeeded via {m}")
+                return response
+            except LLMError as e:
+                if not e.is_failoverable:
+                    raise e
+                logging.warning(f"⚠️ [{m}] failed ({e}). Trying next...")
+                is_fallback = True
+
+        raise LLMError.all_providers_failed(models)
+
+    async def _execute_ab(self, payload, profile, models, session_id, timeout) -> Dict[str, Any]:
+        shuffled = list(models)
+        random.shuffle(shuffled)
+
+        primary = shuffled[0]
+        others  = shuffled[1:]
+
+        response = await self._execute_direct(payload, profile, primary, session_id, timeout)
+
+        for m in others:
+            asyncio.create_task(self._execute_direct_silent(payload, profile, m, session_id, timeout))
+
+        return response
+
+    async def _execute_cost(self, payload, profile, models, session_id, timeout) -> Dict[str, Any]:
+        best_model_str = None
+        best_cost      = float("inf")
+
+        for model_str in models:
+            provider_key, _ = self._parse_model_string(model_str)
+            cheapest_tag    = config.cheapest_model(provider_key)
+            if cheapest_tag is None:
+                continue
+ 
+            cost = config.estimate_cost(cheapest_tag, input_tokens=0, output_tokens=1_000_000)
+            if cost is not None and cost < best_cost:
+                best_cost      = cost
+                best_model_str = cheapest_tag
+
+        if best_model_str is None:
+            logging.warning(f"⚠️ cost mode: no costed models found, falling back to {models[0]}")
+            best_model_str = models[0]
+
+        logging.info(f"💰 cost mode: selected {best_model_str} (${best_cost:.4f}/1M output tokens)")
+        return await self._execute_direct(payload, profile, best_model_str, session_id, timeout)
+
+    async def _execute_direct_silent(self, payload, profile, model_str, session_id, timeout):
+        try:
+            await self._execute_direct(payload, profile, model_str, session_id, timeout)
+        except Exception:
+            pass
+
+    # MARK: - Helpers
+
+    def _parse_model_string(self, s: str):
+        s = s.lower().strip()
+        if s == "gemini" or s.startswith("gemini-"):       return "gemini", s
+        if s == "claude" or s.startswith("claude-"):       return "claude", s
+        if s in ("openai", "gpt-4o") or s.startswith("gpt-") \
+                or s.startswith("o1") or s.startswith("o3") \
+                or s.startswith("o4"):                      return "openai", s
+        return "unknown", s
+
+    def _record_call(self, response: Dict[str, Any], session_id: str, success: bool):
+        timestamp = datetime.now()
+        ts_human  = timestamp.strftime('%Y-%m-%dT%H:%M:%SZ')
+        ts_file   = timestamp.strftime('%Y%m%d%H%M%S')
+        status    = "SUCCESS" if success else "FAILED"
+
+        try:
+            payload = response.get('payload', {})
+            gtin    = (payload.get('product', {}) or {}).get('gtin', '') \
+                      or payload.get('gtin', '') \
+                      or 'unknown'
+            raw     = response.get('raw_json', '')
+
+            os.makedirs(_RESPONSES_DIR, exist_ok=True)
+            filename = f"{ts_file}_{status}_{gtin}.txt"
+
+            with open(os.path.join(_RESPONSES_DIR, filename), 'w', encoding='utf-8') as f:
+                f.write(f"# TIMESTAMP: {ts_human}\n")
+                f.write(f"# STATUS:    {status}\n")
+                f.write(f"# SESSION:   {session_id}\n")
+                f.write(f"# PROVIDER:  {response['provider']}\n")
+                f.write(f"# MODEL:     {response['model']}\n")
+                f.write(f"# LATENCY:   {response.get('latency_ms', -1)}ms\n")
+                f.write(f"# FALLBACK:  {response.get('was_fallback', False)}\n")
+                f.write(f"# GTIN:      {gtin}\n")
+                f.write(f"#\n")
+                f.write(str(raw))
+
+        except Exception as e:
+            logging.error(f"llm_responses write failed: {e}")
+
+    def _update_latency(self, model_tag: str, latency_ms: int):
+        if model_tag not in self._latency_cache:
+            self._latency_cache[model_tag] = {"avg": float(latency_ms), "count": 1}
+        else:
+            c = self._latency_cache[model_tag]
+            c["avg"]   = 0.25 * latency_ms + 0.75 * c["avg"]
+            c["count"] += 1
+
+# Singleton for Flask app
+router = LLMRouter()
+
+
+=====================
+#  llm/skills.py
+=====================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  core/llm/skills.py
+#  trigzi-backend
+#
+#  Prompt loading and variable injection. 
+#  All prompt logic is decoupled into prompts/*.txt flat files.
+#
+
+import os
+import json
+
+_PROMPTS_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'prompts')
+
+class SkillsLibrary:
+
+    @staticmethod
+    def _load_prompt(filename: str) -> str:
+        path = os.path.join(_PROMPTS_DIR, filename)
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+
+    @staticmethod
+    def analyze_text_prompt(ocr_text: str, profile: str) -> str:
+        template = SkillsLibrary._load_prompt('analyze_text.txt')
+        return template.format(profile=profile, ocr_text=ocr_text)
+
+    @staticmethod
+    def analyze_food_image_prompt(profile: str) -> str:
+        template = SkillsLibrary._load_prompt('analyze_food_image.txt')
+        return template.format(profile=profile)
+
+    @staticmethod
+    def enrich_product_prompt(record: dict) -> str:
+        template = SkillsLibrary._load_prompt('enrich_product.txt')
+        return template.format(
+            name=record.get('name', ''),
+            raw_ingredients=record.get('raw_ingredients', ''),
+            nutrition_100g=json.dumps(record.get('nutrition_100g', {})),
+            health_star_rating=record.get('health_star_rating', 'None')
+        )
+
+    @staticmethod
+    def analyze_menu_prompt(ocr_text: str) -> str:
+        template = SkillsLibrary._load_prompt('menu_extract.txt')
+        return template.format(menu_text=ocr_text)
+
+
+========================
+#  llm/validator.py
+========================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  core/llm/validator.py
+#  trigzi-backend
+#
+#  Centralized structural validation for LLM prompts and responses.
+#  Enforces the universal flat-text contract: [OUTPUT] ... ---
+#
+
+import re
+import logging
+
+logger = logging.getLogger(__name__)
+
+class SchemaValidator:
+    
+    @staticmethod
+    def validate_prompt_contract(prompt_text: str) -> None:
+        """
+        PRE-FLIGHT CHECK: Enforces the universal flat-text contract.
+        All prompts MUST contain [ACT AS], [TASK], [INSTRUCTIONS], and
+        an [OUTPUT] block terminated by '---'.
+        """
+        required_headers = ["[ACT AS]", "[TASK]", "[INSTRUCTIONS]"]
+        
+        # 1. Enforce the presence of all required metadata blocks
+        for header in required_headers:
+            # Anchored to the start of a line to prevent false positives if 
+            # the text just happens to contain the phrase.
+            if not re.search(rf'^{re.escape(header)}', prompt_text, re.MULTILINE):
+                raise ValueError(
+                    f"CRITICAL ARCHITECTURE FAILURE: Prompt is missing the required '{header}' block."
+                )
+
+        # 2. Enforce the strict [OUTPUT] block and its terminator
+        if not re.search(r'^\[OUTPUT\][\s\S]*?^---', prompt_text, re.MULTILINE):
+            raise ValueError(
+                "CRITICAL ARCHITECTURE FAILURE: Prompt violates the universal flat-text contract. "
+                "It MUST contain an '[OUTPUT]' block terminated by '---' on a new line."
+            )
+
+    @staticmethod
+    def validate_stream(prompt_text: str, response_text: str) -> bool:
+        """
+        Dynamically extracts the expected schema from the prompt and validates 
+        that the LLM response conforms to it.
+        Fails closed if the prompt is malformed.
+        """
+        # 1. Strict extraction using the exact [OUTPUT] directive
+        schema_match = re.search(r'^\[OUTPUT\]\s*(.*?)^---', prompt_text, re.MULTILINE | re.DOTALL)
+        
+        if not schema_match:
+            logger.error(
+                "SchemaValidator Failed: Prompt is missing the strictly required "
+                "'[OUTPUT]' block or the '---' terminator.\n"
+                f"Prompt snippet: {prompt_text[:200]}..."
+            )
+            return False 
+            
+        expected_keys = []
+        for line in schema_match.group(1).strip().split('\n'):
+            if ':' in line:
+                expected_keys.append(line.split(':')[0].strip())
+                
+        if not expected_keys:
+            logger.error("SchemaValidator Failed: [OUTPUT] block found, but no 'Key:' definitions were detected inside it.")
+            return False
+            
+        # 2. Validate the response blocks
+        blocks = [b.strip() for b in response_text.split("---") if b.strip()]
+        
+        if not blocks:
+            logger.error("SchemaValidator Failed: LLM response contained no data blocks separated by '---'.")
+            return False
+
+        for index, block in enumerate(blocks):
+            # Check if every expected key is present in the block
+            for key in expected_keys:
+                # Case-insensitive check in case the LLM messes up capitalization
+                if f"{key.lower()}:" not in block.lower():
+                    logger.error(
+                        f"SchemaValidator Failed: Missing required key '{key}:' in block {index}.\n"
+                        f"Expected Keys: {expected_keys}\n"
+                        f"Offending Block:\n{block}"
+                    )
+                    return False
+                    
+        return True
+
+
+=====================================
+#  llm/filters/request_filter.py
+=====================================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  core/llm/filters/request_filter.py
+#  trigzi-backend
+#
+#  Protocol + concrete implementations for outbound request transformation.
+#  Enforces flat-text transport modes and injects validated prompts.
+#
+
+from abc import ABC, abstractmethod
+from typing import Any, Dict
+from ..validator import SchemaValidator
+
+
+class RequestFilter(ABC):
+    """
+    Interface for transforming a generic prompt into a provider-specific 
+    payload structure.
+    """
+    @abstractmethod
+    def build_text_payload(self, prompt: str, model_tag: str) -> Dict[str, Any]: pass
+
+    @abstractmethod
+    def build_image_payload(self, prompt: str, image_base64: str, model_tag: str) -> Dict[str, Any]: pass
+
+    def encode_image(self, base64_string: str) -> str:
+        return base64_string
+
+
+class OpenAIRequestFilter(RequestFilter):
+    def build_text_payload(self, prompt: str, model_tag: str) -> Dict[str, Any]:
+        SchemaValidator.validate_prompt_contract(prompt)
+        return {
+            "model": model_tag,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "text"},
+            "max_completion_tokens": 2048
+        }
+
+    def build_image_payload(self, prompt: str, image_base64: str, model_tag: str) -> Dict[str, Any]:
+        SchemaValidator.validate_prompt_contract(prompt)
+        return {
+            "model": model_tag,
+            "messages": [{
+                "role": "user", 
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                ]
+            }],
+            "response_format": {"type": "text"},
+            "max_completion_tokens": 2048
+        }
+
+
+class GeminiRequestFilter(RequestFilter):
+    def build_text_payload(self, prompt: str, model_tag: str) -> Dict[str, Any]:
+        SchemaValidator.validate_prompt_contract(prompt)
+        return {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "text/plain"
+            }
+        }
+
+    def build_image_payload(self, prompt: str, image_base64: str, model_tag: str) -> Dict[str, Any]:
+        SchemaValidator.validate_prompt_contract(prompt)
+        return {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inlineData": {"mimeType": "image/jpeg", "data": image_base64}}
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "text/plain"
+            }
+        }
+
+
+class ClaudeRequestFilter(RequestFilter):
+    def build_text_payload(self, prompt: str, model_tag: str) -> Dict[str, Any]:
+        SchemaValidator.validate_prompt_contract(prompt)
+        return {
+            "model": model_tag,
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+
+    def build_image_payload(self, prompt: str, image_base64: str, model_tag: str) -> Dict[str, Any]:
+        SchemaValidator.validate_prompt_contract(prompt)
+        return {
+            "model": model_tag,
+            "max_tokens": 2048,
+            "messages": [{
+                "role": "user", 
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_base64}},
+                    {"type": "text", "text": prompt}
+                ]
+            }]
+        }
+
+
+======================================
+#  llm/filters/response_filter.py
+======================================
+#!/usr/bin/env python3
+from __future__ import annotations
+#
+#  core/llm/filters/response_filter.py
+#  trigzi-backend
+#
+#  Protocol + concrete implementations for inbound response normalisation.
+#  Extracts raw text strings from provider-specific HTTP envelopes.
+#
+
+import json
+from abc import ABC, abstractmethod
+from typing import Any, Dict
+from ..errors import LLMError
+from .xml_filter import XMLFilter
+
+class ResponseFilter(ABC):
+    @abstractmethod
+    def extract_json(self, data: Dict[str, Any], provider_name: str) -> str:
+        """
+        Extract the raw string (formerly JSON) from the provider's HTTP response.
+        Raises LLMError.decode_failed if extraction fails.
+        """
+        pass
+
+# MARK: - Gemini Response Filter
+class GeminiResponseFilter(ResponseFilter):
+    def extract_json(self, data: Dict[str, Any], provider_name: str) -> str:
+        if "error" in data:
+            error_detail = data["error"]
+            raise self._normalise_gemini_error(error_detail, provider_name)
+
+        try:
+            candidates = data.get("candidates", [])
+            if not candidates:
+                raise ValueError("No candidates found")
+                
+            text = candidates[0]["content"]["parts"][0]["text"]
+            if not text:
+                raise ValueError("Empty part text")
+                
+            return text.strip()
+        except (KeyError, IndexError, ValueError):
+            raise LLMError.decode_failed(provider_name, raw=json.dumps(data))
+
+    def _normalise_gemini_error(self, detail: Dict[str, Any], provider: str) -> LLMError:
+        code = detail.get("code", 500)
+        message = detail.get("message", "Unknown error")
+        if code == 429:
+            return LLMError.rate_limited(provider, retry_after=None)
+        return LLMError.server_error(provider, status_code=code, message=message)
+
+
+# MARK: - Claude Response Filter
+class ClaudeResponseFilter(ResponseFilter):
+    def extract_json(self, data: Dict[str, Any], provider_name: str) -> str:
+        if data.get("type") == "error":
+            error_detail = data.get("error", {})
+            raise self._normalise_claude_error(error_detail, provider_name)
+
+        content_blocks = data.get("content", [])
+        text_parts = [block["text"] for block in content_blocks if block.get("type") == "text" and block.get("text")]
+        raw_text = "".join(text_parts)
+
+        if not raw_text:
+            raise LLMError.empty_response(provider_name)
+
+        # Strip <thinking>…</thinking> blocks before decoding
+        cleaned = XMLFilter.strip_thinking(raw_text).strip()
+
+        # The JSON `{` check is REMOVED to support flat-text extraction
+
+        return cleaned
+
+    def _normalise_claude_error(self, detail: Dict[str, Any], provider: str) -> LLMError:
+        error_type = detail.get("type", "")
+        message = detail.get("message", "Unknown error")
+        if error_type == "rate_limit_error":
+            return LLMError.rate_limited(provider, retry_after=None)
+        elif error_type in ["overloaded_error", "api_error"]:
+            return LLMError.server_error(provider, status_code=503, message=message)
+        elif error_type == "invalid_request_error":
+            return LLMError.invalid_request(reason=message)
+        return LLMError.server_error(provider, status_code=500, message=message)
+
+
+# MARK: - OpenAI Response Filter
+class OpenAIResponseFilter(ResponseFilter):
+    def extract_json(self, data: Dict[str, Any], provider_name: str) -> str:
+        if "error" in data:
+            error_detail = data["error"]
+            raise self._normalise_openai_error(error_detail, provider_name)
+
+        try:
+            choices = data.get("choices", [])
+            if not choices:
+                raise ValueError("No choices returned")
+                
+            text = choices[0]["message"]["content"]
+            if not text:
+                raise ValueError("Empty choice content")
+
+            # Defensive markdown fence stripping (in case the model is stubborn)
+            text = text.strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            elif text.startswith("```text"):
+                text = text[7:]
+            elif text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            
+            cleaned = text.strip()
+
+            # The JSON `{` check is REMOVED to support flat-text extraction
+
+            return cleaned
+
+        except (KeyError, IndexError, ValueError):
+            # Truncation [200] removed to ensure full visibility on crashes
+            raise LLMError.decode_failed(provider_name, raw=json.dumps(data))
+
+    def _normalise_openai_error(self, detail: Dict[str, Any], provider: str) -> LLMError:
+        error_type = detail.get("type", "")
+        message = detail.get("message", "Unknown error")
+        if error_type in ["insufficient_quota", "rate_limit_exceeded"]:
+            return LLMError.rate_limited(provider, retry_after=None)
+        elif error_type == "server_error":
+            return LLMError.server_error(provider, status_code=500, message=message)
+        elif error_type == "invalid_request_error":
+            return LLMError.invalid_request(reason=message)
+        return LLMError.server_error(provider, status_code=500, message=message)
+
+
+=================================
+#  llm/filters/xml_filter.py
+=================================
+#
+#  core/llm/filters/xml_filter.py
+#  trigzi-backend
+#
+#  Standalone JSON ↔ XML converter used by the filter pipeline.
+#  Lives outside any provider so it can be reused for audit, replay,
+#  or any future context that needs format conversion.
+#
+#  JSON → XML: converts the AnalysisResult schema into Claude-friendly
+#  XML structure with <task>, <schema>, and <thinking> scaffolding.
+#
+#  XML → JSON: not needed for current flow (providers return JSON)
+#  but included for audit replay and future use.
+#
+
+import json
+import re
+from typing import Any, Optional
+
+# MARK: - Usage Guide
+#
+# Two calling conventions are supported:
+#
+# 1. Class style (preferred — full feature set):
+#
+#      from core.llm.filters.xml_filter import XMLFilter
+#
+#      xml  = XMLFilter.json_schema_to_xml(schema_json, "Analyze food content.")
+#      text = XMLFilter.strip_thinking(claude_response)
+#      json = XMLFilter.xml_to_json(xml_string)
+#
+# 2. Function style (legacy shims — backwards compatibility):
+#
+#      from core.llm.filters.xml_filter import dict_to_xml, wrap_in_tag
+#
+#      xml  = dict_to_xml({"task": "Analyze", "profile": "Nut Allergy"})
+#      text = wrap_in_tag("instructions", prompt)
+#
+# The class style handles full JSON schema conversion, thinking-block
+# stripping, and round-trip XML->JSON for audit replay.
+# The function shims are kept for compatibility with filters/__init__.py
+# and existing tests — prefer the class in new code.
+
+class XMLFilter:
+    """
+    Static utility class for JSON/XML format conversion.
+    Used primarily to wrap schemas for Anthropic Claude models to encourage reasoning.
+    """
+
+    # MARK: - JSON → XML
+
+    @staticmethod
+    def json_schema_to_xml(json_str: str, task_description: str) -> str:
+        """
+        Wraps a JSON schema string in XML structure that Claude responds 
+        well to. The <thinking> tag instructs Claude to reason before 
+        producing the answer.
+        """
+        return f"""<task>
+{task_description}
+</task>
+
+<thinking>
+Before producing the JSON output, reason through:
+- What ingredients are present or likely present?
+- Which ingredients conflict with the user profile?
+- What is the overall safety verdict and why?
+</thinking>
+
+<output_schema>
+{XMLFilter.json_to_xml_elements(json_str)}
+</output_schema>
+
+<instructions>
+Respond ONLY with valid JSON matching the schema above.
+Do not include XML tags, markdown, or backticks in your response.
+Strip your thinking — return only the final JSON object.
+</instructions>"""
+
+    @staticmethod
+    def json_to_xml_elements(json_str: str) -> str:
+        """
+        Converts a JSON object string into readable XML element descriptions.
+        """
+        try:
+            obj = json.loads(json_str)
+            return XMLFilter._serialize_to_xml(obj, indent=0)
+        except json.JSONDecodeError:
+            return f"<raw>{json_str}</raw>"
+
+    # MARK: - XML → JSON
+
+    @staticmethod
+    def xml_to_json(xml: str) -> Optional[str]:
+        """
+        Extracts the JSON payload from an XML-wrapped response.
+        Strips any <thinking>…</thinking> blocks before parsing.
+        """
+        working = xml
+        working = XMLFilter.strip_thinking(working)
+
+        # Handle explicit output tags if present
+        inner = XMLFilter._extract_xml_tag("output", working)
+        if inner:
+            working = inner
+
+        trimmed = working.strip()
+        if not (trimmed.startswith("{") or trimmed.startswith("[")):
+            return None
+        return trimmed
+
+    # MARK: - Thinking block stripper
+
+    @staticmethod
+    def strip_thinking(response: str) -> str:
+        """Removes <thinking>…</thinking> from raw provider responses."""
+        return XMLFilter._strip_xml_tag("thinking", response)
+
+    # MARK: - Private helpers
+
+    @staticmethod
+    def _serialize_to_xml(value: Any, indent: int) -> str:
+        pad = "  " * indent
+
+        if isinstance(value, dict):
+            items = []
+            for key in sorted(value.keys()):
+                val = value[key]
+                inner = XMLFilter._serialize_to_xml(val, indent + 1)
+                is_complex = isinstance(val, (list, dict))
+                
+                if is_complex:
+                    items.append(f"{pad}<{key}>\n{inner}\n{pad}</{key}>")
+                else:
+                    items.append(f"{pad}<{key}>{inner}</{key}>")
+            return "\n".join(items)
+
+        elif isinstance(value, list):
+            items = []
+            for idx, item in enumerate(value):
+                inner = XMLFilter._serialize_to_xml(item, indent + 1)
+                items.append(f'{pad}<item index="{idx}">\n{inner}\n{pad}</item>')
+            return "\n".join(items)
+
+        elif isinstance(value, str):
+            return value
+
+        elif value is None:
+            return ""
+
+        else:
+            return str(value)
+
+    @staticmethod
+    def _strip_xml_tag(tag: str, text: str) -> str:
+        """Removes all instances of a specific XML tag and its content."""
+        pattern = f"<{tag}>.*?</{tag}>"
+        return re.sub(pattern, "", text, flags=re.DOTALL).strip()
+
+    @staticmethod
+    def _extract_xml_tag(tag: str, text: str) -> Optional[str]:
+        """Extracts the content between a specific XML tag pair."""
+        pattern = f"<{tag}>(.*?)</{tag}>"
+        match = re.search(pattern, text, flags=re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return None
+
+
+# MARK: - Module-level shims
+# Convenience functions delegating to XMLFilter for backwards compatibility
+# with imports in filters/__init__.py and test_filters.py
+
+def dict_to_xml(data: dict) -> str:
+    """Delegate to XMLFilter._serialize_to_xml for dict → XML conversion."""
+    return XMLFilter._serialize_to_xml(data, indent=0)
+
+
+def wrap_in_tag(tag: str, content: str) -> str:
+    """Wrap content string in an XML tag."""
+    return f"<{tag}>{content}</{tag}>"
+
+
+=============================
+#  llm/providers/base.py
+=============================
+# core/llm/providers/base.py
+
+import asyncio
+import aiohttp
+import time
+from typing import Dict, Any
+from ..errors import LLMError
+from ..skills import SkillsLibrary
+from ..filters import RequestFilter, ResponseFilter
+
+
+class BaseProvider:
+
+    @property
+    def provider_name(self) -> str:
+        return "BaseProvider"
+
+    @property
+    def default_model(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def request_filter(self) -> RequestFilter:
+        raise NotImplementedError
+
+    @property
+    def response_filter(self) -> ResponseFilter:
+        raise NotImplementedError
+
+    def build_url(self, model_tag: str) -> str:
+        raise NotImplementedError
+
+    def headers(self) -> Dict[str, str]:
+        return {}
+
+    @property
+    def max_retries(self) -> int:
+        return 2
+
+    @property
+    def retry_delay(self) -> float:
+        return 1.0
+
+    async def analyze(
+        self,
+        payload_data: Dict[str, Any],
+        profile: str,
+        model_tag: str,
+        timeout_s: float = 30.0
+    ) -> Dict[str, Any]:
+
+        tag      = model_tag if model_tag else self.default_model
+        last_err = LLMError.unknown_provider(self.provider_name)
+
+        for attempt in range(self.max_retries + 1):
+            if attempt > 0:
+                await asyncio.sleep(self.retry_delay)
+                print(f"♻️ [{self.provider_name}] Retry {attempt}/{self.max_retries}")
+
+            try:
+                start_time  = time.time()
+                raw_string  = await self._perform_request(payload_data, profile, tag, timeout_s)
+                latency_ms  = int((time.time() - start_time) * 1000)
+
+                # ARCHITECTURE UPDATE: The router is now a dumb pipe.
+                # No JSON decoding happens here. It just returns the raw string.
+                return {
+                    "result":       raw_string,
+                    "model":        tag,
+                    "provider":     self.provider_name,
+                    "latency_ms":   latency_ms,
+                    "raw_json":     raw_string,
+                    "was_fallback": False,
+                }
+
+            except LLMError as err:
+                last_err = err
+                if not err.is_failoverable:
+                    raise err
+                
+                print(f"⚠️ [{self.provider_name}] Attempt {attempt + 1} failed: {err}")
+                
+                # --- INJECT RAW DUMP HERE ---
+                if err.raw_response:
+                    print(f"🔻 --- RAW UNREADABLE RESPONSE [{self.provider_name}] --- 🔻")
+                    print(err.raw_response)
+                    print(f"🔺 {'-' * 40} 🔺")
+                # ----------------------------
+
+        raise last_err
+
+    async def _perform_request(
+        self,
+        payload_data: Dict[str, Any],
+        profile: str,
+        model_tag: str,
+        timeout_s: float
+    ) -> str:
+
+        url = self.build_url(model_tag)
+
+        # Payload dispatch
+        if "image_base64" in payload_data:
+            prompt  = SkillsLibrary.analyze_food_image_prompt(profile)
+            payload = self.request_filter.build_image_payload(
+                prompt, payload_data["image_base64"], model_tag
+            )
+
+        elif "product" in payload_data:
+            prompt  = (payload_data.get("prompt")
+                       or SkillsLibrary.enrich_product_prompt(payload_data["product"]))
+            payload = self.request_filter.build_text_payload(prompt, model_tag)
+
+        elif "menu_text" in payload_data:
+            # We don't pass the profile into this prompt
+            prompt  = SkillsLibrary.analyze_menu_prompt(payload_data["menu_text"])
+            payload = self.request_filter.build_text_payload(prompt, model_tag)
+
+        elif "text" in payload_data:
+            prompt  = SkillsLibrary.analyze_text_prompt(payload_data["text"], profile)
+            payload = self.request_filter.build_text_payload(prompt, model_tag)
+
+        elif "prompt" in payload_data:
+            payload = self.request_filter.build_text_payload(
+                payload_data["prompt"], model_tag
+            )
+
+        else:
+            raise LLMError.invalid_request(
+                "Payload must contain 'image_base64', 'product', 'menu_text', 'text', or 'prompt'"
+            )
+
+        headers = self.headers()
+        headers["Content-Type"] = "application/json"
+        # --- DEBUG WIRE INJECTION ---
+        import json
+        print(f"\n{'='*60}")
+        print(f"📡 [DEBUG] ROUTING TO: {self.provider_name} ({model_tag})")
+        print(f"📦 [DEBUG] HEADERS:")
+        for k, v in headers.items():
+            # Mask API keys so you can safely paste the logs
+            if "Bearer" in str(v):
+                v = str(v)[:15] + "...[MASKED]"
+            if "x-api-key" in str(k).lower() or "key" in str(k).lower():
+                v = str(v)[:8] + "...[MASKED]"
+            print(f"   {k}: {v}")
+        print(f"📄 [DEBUG] FULL PAYLOAD:")
+        print(json.dumps(payload, indent=2))
+        print(f"{'='*60}\n")
+        # ----------------------------
+        timeout = aiohttp.ClientTimeout(total=timeout_s)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload, headers=headers) as response:
+                    content_type = response.headers.get("Content-Type", "")
+
+                    if "application/json" in content_type:
+                        resp_json = await response.json()
+                        return self.response_filter.extract_json(resp_json, self.provider_name)
+                    else:
+                        resp_text = await response.text()
+                        if response.status == 429:
+                            raise LLMError.rate_limited(self.provider_name)
+                        raise LLMError.server_error(
+                            self.provider_name, response.status, resp_text[:200]
+                        )
+
+        except asyncio.TimeoutError:
+            raise LLMError.network_timeout(self.provider_name)
+        except aiohttp.ClientError as e:
+            raise LLMError.network_failure(self.provider_name, str(e))
+
+
+===============================
+#  llm/providers/claude.py
+===============================
+# core/llm/providers/claude.py
+import os
+from .base import BaseProvider
+from ..filters import ClaudeRequestFilter, ClaudeResponseFilter
+from ..config import config
+from ..probe import ClaudeProbeMixin
+
+
+class ClaudeProvider(ClaudeProbeMixin, BaseProvider):
+
+    @property
+    def provider_name(self) -> str:
+        return "Claude"
+
+    @property
+    def default_model(self) -> str:
+        return config.primary_model("claude")
+
+    @property
+    def request_filter(self):
+        return ClaudeRequestFilter()
+
+    @property
+    def response_filter(self):
+        return ClaudeResponseFilter()
+
+    def build_url(self, model_tag: str) -> str:
+        return "https://api.anthropic.com/v1/messages"
+
+    def headers(self) -> dict:
+        return {
+            "x-api-key":         os.environ.get("CLAUDE_API_KEY", ""),
+            "anthropic-version": "2023-06-01"
+        }
+
+
+===============================
+#  llm/providers/gemini.py
+===============================
+# core/llm/providers/gemini.py
+import os
+from .base import BaseProvider
+from ..filters import GeminiRequestFilter, GeminiResponseFilter
+from ..config import config
+from ..probe import GeminiProbeMixin
+
+
+class GeminiProvider(GeminiProbeMixin, BaseProvider):
+
+    @property
+    def provider_name(self) -> str:
+        return "Gemini"
+
+    @property
+    def default_model(self) -> str:
+        return config.primary_model("gemini")
+
+    @property
+    def request_filter(self):
+        return GeminiRequestFilter()
+
+    @property
+    def response_filter(self):
+        return GeminiResponseFilter()
+
+    def build_url(self, model_tag: str) -> str:
+        key = os.environ.get("GEMINI_API_KEY", "")
+        tag = config.resolve(model_tag, "gemini")
+        return f"https://generativelanguage.googleapis.com/v1beta/models/{tag}:generateContent?key={key}"
+
+    def headers(self) -> dict:
+        return {}
+
+
+===============================
+#  llm/providers/openai.py
+===============================
+# core/llm/providers/openai.py
+import os
+from .base import BaseProvider
+from ..filters import OpenAIRequestFilter, OpenAIResponseFilter
+from ..config import config
+from ..probe import OpenAIProbeMixin
+
+
+class OpenAIProvider(OpenAIProbeMixin, BaseProvider):
+
+    @property
+    def provider_name(self) -> str:
+        return "OpenAI"
+
+    @property
+    def default_model(self) -> str:
+        return config.primary_model("openai")
+
+    @property
+    def request_filter(self):
+        return OpenAIRequestFilter()
+
+    @property
+    def response_filter(self):
+        return OpenAIResponseFilter()
+
+    def build_url(self, model_tag: str) -> str:
+        return "https://api.openai.com/v1/chat/completions"
+
+    def headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}"
+        }
+

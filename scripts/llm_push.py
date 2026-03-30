@@ -8,13 +8,8 @@ from __future__ import annotations
 #  Routes through core/llm/router.py for provider failover.
 #  Provider is selected by --provider (default: gemini).
 #
-#  The raw response is saved to logs/llm_responses/<timestamp>_<gtin>.txt
-#  for processing by llm_pull.py (Stage 2).
-#
-#  Usage:
-#      ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt
-#      ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt --prompt prompts/extract_v2.txt
-#      ./scripts/llm_push.py logs/scans/1743000000_9310077217814_ocr.txt --provider claude
+#  The raw response is saved to logs/llm_responses/<timestamp>_<gtin_or_menu>.txt
+#  for processing by llm_pull.py (Stage 2) or for manual latency/accuracy review.
 #
 
 import os
@@ -43,7 +38,8 @@ def load_scan(path: str) -> dict:
             if line.startswith(f'{key}:'):
                 parts[key.lower()] = line.split(':', 1)[1].strip()
 
-    for section in ('FRONT OF PACKAGE', 'NUTRITION & INGREDIENTS', 'INGREDIENTS'):
+    # Added 'MENU TEXT' to support restaurant menu OCR extraction
+    for section in ('FRONT OF PACKAGE', 'NUTRITION & INGREDIENTS', 'INGREDIENTS', 'MENU TEXT'):
         marker = f'=== {section} ==='
         if marker in content:
             after = content.split(marker, 1)[1]
@@ -64,7 +60,7 @@ async def call_router(prompt: str, provider: str, timeout: float) -> tuple[str, 
         payload       = {"prompt": prompt},
         profile       = "",
         model_strings = [provider],
-        optimize      = "accuracy",
+        optimize      = "accuracy", # forces execution down the direct path or A/B paths
         timeout       = timeout,
     )
     result = response.get("result", {})
@@ -87,9 +83,12 @@ def run(scan_path: str, prompt_path: str, provider: str, timeout: float) -> str:
     scan            = load_scan(scan_path)
     prompt_template = load_prompt(prompt_path)
 
+    # Inject all potential template variables. Python's .format() safely ignores 
+    # keyword arguments that don't exist in the specific template being used.
     prompt = prompt_template.format(
         text_front     = scan.get('front_of_package', ''),
         text_nutrition = scan.get('nutrition_ingredients', '') or scan.get('ingredients', ''),
+        menu_text      = scan.get('menu_text', '')
     )
 
     print(f"Calling router ({provider})...")
@@ -99,15 +98,16 @@ def run(scan_path: str, prompt_path: str, provider: str, timeout: float) -> str:
     print(f"Response in {elapsed:.1f}s ({len(text)} chars) via {model_used}")
 
     os.makedirs(RESPONSES_DIR, exist_ok=True)
-    gtin     = scan.get('gtin', 'unknown')
-    out_file = os.path.join(RESPONSES_DIR, f"{int(time.time())}_{gtin}.txt")
+    # Use GTIN if it's a product, otherwise default to 'menu'
+    identifier = scan.get('gtin', 'menu')
+    out_file = os.path.join(RESPONSES_DIR, f"{int(time.time())}_{identifier}.txt")
 
     with open(out_file, 'w', encoding='utf-8') as f:
         f.write(f"# SCAN: {scan_path}\n")
         f.write(f"# PROMPT: {prompt_path}\n")
         f.write(f"# MODEL: {model_used}\n")
         f.write(f"# ELAPSED: {elapsed:.1f}s\n")
-        f.write(f"# GTIN: {gtin}\n")
+        f.write(f"# ID: {identifier}\n")
         f.write(f"#\n")
         f.write(text)
 
@@ -117,7 +117,6 @@ def run(scan_path: str, prompt_path: str, provider: str, timeout: float) -> str:
     print(text)
     return out_file
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Stage 1: Send scan file to LLM router, save raw response."
@@ -126,10 +125,13 @@ if __name__ == '__main__':
         help="Path to scan file (logs/scans/*.txt)")
     parser.add_argument('--prompt', default=DEFAULT_PROMPT,
         help=f"Prompt template (default: extract_v1.txt)")
+    
+    # REMOVED the 'choices' constraint so you can pass specific model tags
     parser.add_argument('--provider', default='gemini',
-        choices=['gemini', 'claude', 'openai'],
-        help="LLM provider (default: gemini)")
+        help="LLM provider or specific model tag (e.g., gemini, claude-haiku-4-5-20251001)")
+        
     parser.add_argument('--timeout', type=float, default=60.0,
         help="Request timeout in seconds (default: 60)")
     args = parser.parse_args()
+    
     run(args.scan, args.prompt, args.provider, args.timeout)

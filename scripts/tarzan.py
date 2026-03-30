@@ -45,7 +45,7 @@ def excluded_dir(name: str) -> bool:
 
 
 def excluded_file(name: str) -> bool:
-    return name in EXCLUDE_FILES or not name.endswith('.py')
+    return name in EXCLUDE_FILES
 
 
 def collect(root: str, extra_exclude: set) -> list[str]:

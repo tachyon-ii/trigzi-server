@@ -193,6 +193,35 @@ class GeminiProbeMixin(ProbeMixin):
     def _model_name_key(self) -> str:
         return "name"   # Gemini returns {"name": "models/gemini-2.5-flash", ...}
 
+    def _extract_model_names(self, data: dict) -> List[str]:
+        """
+        Aggressively filter the Gemini model list to return 
+        only stable, text-capable reasoning engines.
+        """
+        valid_models = []
+        
+        # Exclusion list to strip multimodal, experimental, and embedding noise
+        noise_filters = [
+            "preview", "audio", "vision", "embedding", "imagen", 
+            "veo", "lyria", "nano-banana", "aqa", "robotics", 
+            "tts", "computer-use", "001" # Drops legacy static versions in favor of 'latest' aliases
+        ]
+
+        for model in data.get("models", []):
+            # 1. API Capability check: Must be a text generator
+            if "generateContent" not in model.get("supportedGenerationMethods", []):
+                continue
+            
+            # Strip the arbitrary Google prefix
+            name = model.get("name", "").replace("models/", "")
+            
+            # 2. Semantic name check: Drop the laboratory noise
+            if any(noise in name.lower() for noise in noise_filters):
+                continue
+                
+            valid_models.append(name)
+
+        return sorted(valid_models)
 
 class ClaudeProbeMixin(ProbeMixin):
     def _models_url(self) -> str:
@@ -222,6 +251,24 @@ class OpenAIProbeMixin(ProbeMixin):
     def _model_name_key(self) -> str:
         return "id"   # OpenAI returns {"id": "gpt-4o", ...}
 
+    def _extract_model_names(self, data: dict) -> list:
+        import datetime
+        models = data.get("data", [])
+        
+        # Sort by the 'created' unix timestamp, descending (newest first)
+        models.sort(key=lambda x: x.get("created", 0), reverse=True)
+        
+        names = []
+        for m in models:
+            name = m.get("id", "")
+            ts = m.get("created", 0)
+            # Convert unix timestamp to YYYY-MM-DD
+            date_str = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d') if ts else "unknown"
+            
+            # Pad the name to align the dates neatly in the terminal
+            names.append(f"{name:<38} [{date_str}]")
+            
+        return names
 
 # MARK: - ProbeScheduler
 

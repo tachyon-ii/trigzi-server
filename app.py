@@ -4,23 +4,27 @@ from __future__ import annotations
 #  app.py
 #  trigzi
 #
-#  Quart ASGI application — async end-to-end.
-#  Served by Hypercorn (replaces Gunicorn).
-#
-#  Routes:
-#    GET  /api/v1/product/<gtin>      — product lookup (JSON or SSE)
-#    POST /api/v1/analyse/product     — unknown product OCR analysis
-#    POST /api/v1/analyse/meal        — meal photo analysis
-#    POST /api/v1/analyse/menu        — menu OCR text analysis
-#
 
+import os
+import json
+import logging
 from quart import Quart, jsonify, request, Response
+
 from core import data_manager
 from core.enricher import enrich
 from core.analyser import analyse_product, analyse_meal, analyse_menu
-from core.telemetry import telemetry_bp, log_ocr_scan
-import json
-import time
+from core.telemetry import telemetry_bp, log_ocr_scan, log_menu_scan
+
+# --- BOMB-PROOF FILE LOGGING ---
+os.makedirs('/var/www/trigzi/logs', exist_ok=True)
+logging.basicConfig(
+    filename='/var/www/trigzi/logs/api.log',
+    level=logging.DEBUG,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    force=True # Override any Quart defaults
+)
+logger = logging.getLogger(__name__)
 
 app = Quart(__name__)
 app.register_blueprint(telemetry_bp)
@@ -35,7 +39,7 @@ def _sse(event: str, data: dict) -> str:
 
 @app.route('/api/v1/product/<gtin>', methods=['GET'])
 async def get_product(gtin):
-    print(f"[{time.strftime('%H:%M:%S')}] Scan: {gtin}")
+    logger.info(f"Scan: {gtin}")
 
     if not gtin.isdigit() or not (MIN_GTIN_LEN <= len(gtin) <= MAX_GTIN_LEN):
         return jsonify({"error": "Invalid barcode."}), 400
@@ -49,16 +53,13 @@ async def get_product(gtin):
         return jsonify({"status": "complete", "product": record}), 200
 
     async def generate():
-        # Stage 1: product found — iOS shows name on loading screen
         name  = record.get("name",  "this product")
         brand = record.get("brand", "")
         label = f"{name} by {brand}" if brand else name
         yield _sse("progress", {"message": f"Found {label}"})
  
-        # Stage 2: enrichment starting
         yield _sse("progress", {"message": "Running latest analytics\u2026"})
  
-        # Stage 3: enriched result — iOS navigates to product detail
         enriched = await enrich(record)
         yield _sse("enriched", {"status": "complete", "product": enriched})
 
@@ -82,11 +83,12 @@ async def analyse_product_route():
     if not gtin:
         return jsonify({"error": "Missing gtin."}), 400
 
-    print(f"[{time.strftime('%H:%M:%S')}] Analyse product: {gtin}")
+    logger.info(f"Analyse product: {gtin}")
     log_ocr_scan(gtin=gtin, text_front=text_front, text_nutrition=text_nutrition)
 
     result = await analyse_product(gtin=gtin, text_front=text_front, text_nutrition=text_nutrition)
     if not result:
+        logger.error(f"Analysis failed for product {gtin}")
         return jsonify({"error": "Analysis failed."}), 500
 
     return jsonify({"status": "ok", "result": result}), 200
@@ -98,16 +100,20 @@ async def analyse_meal_route():
     if not data:
         return jsonify({"error": "Invalid payload."}), 400
 
-    image   = data.get('image', '').strip()
-    profile = data.get('profile', '').strip()
+    image   = data.get('image', '')
+    profile = data.get('profile', {})
 
+    if isinstance(image, str): image = image.strip()
     if not image:
         return jsonify({"error": "Missing image."}), 400
 
-    print(f"[{time.strftime('%H:%M:%S')}] Analyse meal ({len(image)} chars base64)")
+    logger.info(f"Analyse meal ({len(image)} chars base64)")
 
-    result = await analyse_meal(image=image, profile=profile)
+    profile_str = json.dumps(profile) if isinstance(profile, dict) else str(profile)
+
+    result = await analyse_meal(image=image, profile=profile_str)
     if not result:
+        logger.error("Analysis failed for meal photo")
         return jsonify({"error": "Analysis failed."}), 500
 
     return jsonify({"status": "ok", "result": result}), 200
@@ -119,20 +125,23 @@ async def analyse_menu_route():
     if not data:
         return jsonify({"error": "Invalid payload."}), 400
 
-    text    = data.get('text', '').strip()
-    profile = data.get('profile', '').strip()
+    text = data.get('text', '')
 
+    if isinstance(text, str): text = text.strip()
     if not text:
+        logger.error("Missing text in menu request")
         return jsonify({"error": "Missing text."}), 400
 
-    print(f"[{time.strftime('%H:%M:%S')}] Analyse menu ({len(text)} chars)")
+    # CRITICAL: Save the SEZAR menu to disk so we can A/B test it
+    saved_file = log_menu_scan(text)
+    logger.info(f"Analyse menu ({len(text)} chars) -> Saved to {saved_file}")
 
-    result = await analyse_menu(text=text, profile=profile)
+    result = await analyse_menu(text=text)
     if not result:
+        logger.error("Analysis failed for menu")
         return jsonify({"error": "Analysis failed."}), 500
 
     return jsonify({"status": "ok", "result": result}), 200
-
 
 if __name__ == '__main__':
     import asyncio

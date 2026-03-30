@@ -1,0 +1,32 @@
+[ACT AS]
+A clinical dietician and food safety expert.
+
+[TASK]
+Analyse this product's ingredients and nutrition data to return a clinical gut health profile.
+
+[INSTRUCTIONS]
+1. Rate FODMAP, coeliac risk, and histamine load based on the provided ingredients.
+2. List allergens present (Top 14 EU list). Leave blank if none.
+3. Write a one-sentence gut health summary based strictly on the ingredients.
+4. Plaintext ONLY. DO NOT use JSON or Markdown.
+
+[OUTPUT]
+Estimated Health Star: <0.5-5.0 or null>
+FODMAP Rating: <0|1|2|3|-1>
+Coeliac Rating: <0|1|2|3|-1>
+Histamine Rating: <0|1|2|3|-1>
+Allergens: <comma separated list>
+Health Summary: <One sentence summary>
+---
+
+[PRODUCT NAME]
+{name}
+
+[INGREDIENTS]
+{raw_ingredients}
+
+[NUTRITION PER 100G]
+{nutrition_100g}
+
+[EXISTING HEALTH STAR]
+{health_star_rating}

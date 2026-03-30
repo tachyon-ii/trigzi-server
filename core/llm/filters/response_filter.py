@@ -1,42 +1,29 @@
+#!/usr/bin/env python3
+from __future__ import annotations
 #
 #  core/llm/filters/response_filter.py
 #  trigzi-backend
 #
 #  Protocol + concrete implementations for inbound response normalisation.
-#
-#  ResponseFilter sits between the raw HTTP response and the JSON decoder.
-#  Each provider wraps its result differently; these filters extract the
-#  clean JSON string before AnalysisResult decoding.
-#
-#  GeminiResponseFilter  — unwrap candidates[0].content.parts[0].text
-#  ClaudeResponseFilter  — strip <thinking> blocks, extract content[0].text
+#  Extracts raw text strings from provider-specific HTTP envelopes.
 #
 
 import json
 from abc import ABC, abstractmethod
 from typing import Any, Dict
-from .errors import LLMError
+from ..errors import LLMError
 from .xml_filter import XMLFilter
 
-# MARK: - Response Filter Protocol
-
 class ResponseFilter(ABC):
-    """
-    Interface for extracting the raw JSON string from provider-specific 
-    HTTP response envelopes.
-    """
-    
     @abstractmethod
     def extract_json(self, data: Dict[str, Any], provider_name: str) -> str:
         """
-        Extract the raw JSON string from the provider's HTTP response data.
+        Extract the raw string (formerly JSON) from the provider's HTTP response.
         Raises LLMError.decode_failed if extraction fails.
         """
         pass
 
-
 # MARK: - Gemini Response Filter
-
 class GeminiResponseFilter(ResponseFilter):
     def extract_json(self, data: Dict[str, Any], provider_name: str) -> str:
         if "error" in data:
@@ -65,14 +52,12 @@ class GeminiResponseFilter(ResponseFilter):
 
 
 # MARK: - Claude Response Filter
-
 class ClaudeResponseFilter(ResponseFilter):
     def extract_json(self, data: Dict[str, Any], provider_name: str) -> str:
         if data.get("type") == "error":
             error_detail = data.get("error", {})
             raise self._normalise_claude_error(error_detail, provider_name)
 
-        # Extract text from content blocks (skip non-text blocks like tool_use)
         content_blocks = data.get("content", [])
         text_parts = [block["text"] for block in content_blocks if block.get("type") == "text" and block.get("text")]
         raw_text = "".join(text_parts)
@@ -83,9 +68,7 @@ class ClaudeResponseFilter(ResponseFilter):
         # Strip <thinking>…</thinking> blocks before decoding
         cleaned = XMLFilter.strip_thinking(raw_text).strip()
 
-        # Validate it looks like JSON
-        if not (cleaned.startswith("{") or cleaned.startswith("[")):
-            raise LLMError.decode_failed(provider_name, raw=cleaned)
+        # The JSON `{` check is REMOVED to support flat-text extraction
 
         return cleaned
 
@@ -102,7 +85,6 @@ class ClaudeResponseFilter(ResponseFilter):
 
 
 # MARK: - OpenAI Response Filter
-
 class OpenAIResponseFilter(ResponseFilter):
     def extract_json(self, data: Dict[str, Any], provider_name: str) -> str:
         if "error" in data:
@@ -118,9 +100,11 @@ class OpenAIResponseFilter(ResponseFilter):
             if not text:
                 raise ValueError("Empty choice content")
 
-            # Defensive markdown fence stripping
+            # Defensive markdown fence stripping (in case the model is stubborn)
             text = text.strip()
             if text.startswith("```json"):
+                text = text[7:]
+            elif text.startswith("```text"):
                 text = text[7:]
             elif text.startswith("```"):
                 text = text[3:]
@@ -129,13 +113,13 @@ class OpenAIResponseFilter(ResponseFilter):
             
             cleaned = text.strip()
 
-            if not (cleaned.startswith("{") or cleaned.startswith("[")):
-                raise LLMError.decode_failed(provider_name, raw=cleaned[:200])
+            # The JSON `{` check is REMOVED to support flat-text extraction
 
             return cleaned
 
         except (KeyError, IndexError, ValueError):
-            raise LLMError.decode_failed(provider_name, raw=json.dumps(data)[:200])
+            # Truncation [200] removed to ensure full visibility on crashes
+            raise LLMError.decode_failed(provider_name, raw=json.dumps(data))
 
     def _normalise_openai_error(self, detail: Dict[str, Any], provider: str) -> LLMError:
         error_type = detail.get("type", "")

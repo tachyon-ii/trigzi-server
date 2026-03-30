@@ -1,20 +1,7 @@
 # core/llm/providers/base.py
-#
-#  Abstract base class for all LLM providers.
-#
-#  Payload dispatch in _perform_request():
-#    {"image_base64": ...}  — multimodal meal photo analysis
-#    {"product": ...}       — product enrichment (structured data)
-#    {"text": ...}          — OCR text analysis (menu, label)
-#    {"prompt": ...}        — raw prompt pass-through
-#
-#  Format conversion (JSON/XML) is handled by per-provider request/response
-#  filters — BaseProvider never sees provider-specific wire formats.
-#
 
 import asyncio
 import aiohttp
-import json
 import time
 from typing import Dict, Any
 from ..errors import LLMError
@@ -72,20 +59,17 @@ class BaseProvider:
 
             try:
                 start_time  = time.time()
-                json_string = await self._perform_request(payload_data, profile, tag, timeout_s)
+                raw_string  = await self._perform_request(payload_data, profile, tag, timeout_s)
                 latency_ms  = int((time.time() - start_time) * 1000)
 
-                try:
-                    result_obj = json.loads(json_string)
-                except json.JSONDecodeError:
-                    raise LLMError.decode_failed(self.provider_name, json_string)
-
+                # ARCHITECTURE UPDATE: The router is now a dumb pipe.
+                # No JSON decoding happens here. It just returns the raw string.
                 return {
-                    "result":       result_obj,
+                    "result":       raw_string,
                     "model":        tag,
                     "provider":     self.provider_name,
                     "latency_ms":   latency_ms,
-                    "raw_json":     json_string,
+                    "raw_json":     raw_string,
                     "was_fallback": False,
                 }
 
@@ -93,7 +77,15 @@ class BaseProvider:
                 last_err = err
                 if not err.is_failoverable:
                     raise err
+                
                 print(f"⚠️ [{self.provider_name}] Attempt {attempt + 1} failed: {err}")
+                
+                # --- INJECT RAW DUMP HERE ---
+                if err.raw_response:
+                    print(f"🔻 --- RAW UNREADABLE RESPONSE [{self.provider_name}] --- 🔻")
+                    print(err.raw_response)
+                    print(f"🔺 {'-' * 40} 🔺")
+                # ----------------------------
 
         raise last_err
 
@@ -107,7 +99,7 @@ class BaseProvider:
 
         url = self.build_url(model_tag)
 
-        # Payload dispatch — image checked first (may also contain prompt key)
+        # Payload dispatch
         if "image_base64" in payload_data:
             prompt  = SkillsLibrary.analyze_food_image_prompt(profile)
             payload = self.request_filter.build_image_payload(
@@ -117,6 +109,11 @@ class BaseProvider:
         elif "product" in payload_data:
             prompt  = (payload_data.get("prompt")
                        or SkillsLibrary.enrich_product_prompt(payload_data["product"]))
+            payload = self.request_filter.build_text_payload(prompt, model_tag)
+
+        elif "menu_text" in payload_data:
+            # We don't pass the profile into this prompt
+            prompt  = SkillsLibrary.analyze_menu_prompt(payload_data["menu_text"])
             payload = self.request_filter.build_text_payload(prompt, model_tag)
 
         elif "text" in payload_data:
@@ -130,12 +127,27 @@ class BaseProvider:
 
         else:
             raise LLMError.invalid_request(
-                "Payload must contain 'image_base64', 'product', 'text', or 'prompt'"
+                "Payload must contain 'image_base64', 'product', 'menu_text', 'text', or 'prompt'"
             )
 
         headers = self.headers()
         headers["Content-Type"] = "application/json"
-
+        # --- DEBUG WIRE INJECTION ---
+        import json
+        print(f"\n{'='*60}")
+        print(f"📡 [DEBUG] ROUTING TO: {self.provider_name} ({model_tag})")
+        print(f"📦 [DEBUG] HEADERS:")
+        for k, v in headers.items():
+            # Mask API keys so you can safely paste the logs
+            if "Bearer" in str(v):
+                v = str(v)[:15] + "...[MASKED]"
+            if "x-api-key" in str(k).lower() or "key" in str(k).lower():
+                v = str(v)[:8] + "...[MASKED]"
+            print(f"   {k}: {v}")
+        print(f"📄 [DEBUG] FULL PAYLOAD:")
+        print(json.dumps(payload, indent=2))
+        print(f"{'='*60}\n")
+        # ----------------------------
         timeout = aiohttp.ClientTimeout(total=timeout_s)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:

@@ -3,6 +3,7 @@ import asyncio
 import os
 import uuid
 import random
+import logging
 from datetime import datetime
 from typing import List, Dict, Any
 
@@ -16,16 +17,6 @@ _RESPONSES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'logs', 'll
 
 
 class LLMRouter:
-    """
-    Central hub for LLM request orchestration.
-    Ported from LLMRouter.swift.
-
-    Modes:
-    - direct:   Single model, straight through
-    - race:     Concurrent, return fastest
-    - failover: Sequential, error-based fallback chain
-    - ab:       Primary returns to caller; others fire in background for telemetry
-    """
 
     def __init__(self):
         self.registry = {
@@ -33,7 +24,6 @@ class LLMRouter:
             "claude": ClaudeProvider(),
             "openai": OpenAIProvider()
         }
-        # EMA latency cache: {model_tag: {avg: float, count: int}}
         self._latency_cache: Dict[str, Dict[str, Any]] = {}
 
     # MARK: - Public API
@@ -58,7 +48,7 @@ class LLMRouter:
         elif mode == "race":
             return await self._execute_race(payload, profile, model_strings, session_id, timeout)
         elif mode == "failover":
-            return await self._execute_failover(payload, profile, model_strings, session_id, timeout)
+             return await self._execute_failover(payload, profile, model_strings, session_id, timeout)
         elif mode == "ab":
             return await self._execute_ab(payload, profile, model_strings, session_id, timeout)
         elif mode == "cost":
@@ -77,7 +67,7 @@ class LLMRouter:
             return "ab"
         if optimize == "cost":
             return "cost"
-        return "failover"   # default: covers "failover" explicitly and any unrecognised value
+        return "failover"
 
     # MARK: - Execution engines
 
@@ -89,14 +79,31 @@ class LLMRouter:
             raise LLMError.unknown_provider(provider_key)
 
         resolved_tag = config.resolve(model_tag, provider_key)
-        response     = await provider.analyze(payload, profile, resolved_tag, timeout)
+        
+        # LOGGING INJECTION: Watch the handoff instantly
+        logging.info(f"➡️ Routing request to {provider_key.upper()} ({resolved_tag})...")
 
-        response['payload'] = payload  # carry payload so _record_call can extract GTIN
-
-        self._record_call(response, session_id, success=True)
-        self._update_latency(resolved_tag, response["latency_ms"])
-
-        return response
+        try:
+            response = await provider.analyze(payload, profile, resolved_tag, timeout)
+            response['payload'] = payload  
+            self._record_call(response, session_id, success=True)
+            self._update_latency(resolved_tag, response["latency_ms"])
+            
+            logging.info(f"✅ {provider_key.upper()} succeeded in {response['latency_ms']}ms")
+            return response
+            
+        except BaseException as e:
+            # THE FIX: BaseException catches CancelledError (Nginx dropping the connection)
+            logging.error(f"❌ {provider_key.upper()} halted: {type(e).__name__} - {str(e)}")
+            fail_resp = {
+                'provider': provider_key,
+                'model': resolved_tag,
+                'latency_ms': -1,
+                'payload': payload,
+                'raw_json': f"CRASH/TIMEOUT/CANCELLED: {type(e).__name__} - {str(e)}"
+            }
+            self._record_call(fail_resp, session_id, success=False)
+            raise e
 
     async def _execute_race(self, payload, profile, models, session_id, timeout) -> Dict[str, Any]:
         tasks = [
@@ -111,10 +118,9 @@ class LLMRouter:
         for task in done:
             try:
                 winner = task.result()
-                print(f"🏁 Race won by {winner['provider']}/{winner['model']} in {winner['latency_ms']}ms")
                 return winner
             except Exception as e:
-                print(f"⚠️ Racer failed: {e}")
+                logging.warning(f"⚠️ Racer failed: {e}")
 
         raise LLMError.all_providers_failed(models)
 
@@ -126,12 +132,12 @@ class LLMRouter:
                 response = await self._execute_direct(payload, profile, m, session_id, timeout)
                 if is_fallback:
                     response["was_fallback"] = True
-                    print(f"⚡️ Failover succeeded via {m}")
+                    logging.info(f"⚡️ Failover succeeded via {m}")
                 return response
             except LLMError as e:
                 if not e.is_failoverable:
                     raise e
-                print(f"❌ [{m}] failed ({e}). Trying next...")
+                logging.warning(f"⚠️ [{m}] failed ({e}). Trying next...")
                 is_fallback = True
 
         raise LLMError.all_providers_failed(models)
@@ -143,21 +149,14 @@ class LLMRouter:
         primary = shuffled[0]
         others  = shuffled[1:]
 
-        # Primary is blocking — returned to caller
         response = await self._execute_direct(payload, profile, primary, session_id, timeout)
 
-        # Others fire in background for telemetry / consensus
         for m in others:
             asyncio.create_task(self._execute_direct_silent(payload, profile, m, session_id, timeout))
 
         return response
 
     async def _execute_cost(self, payload, profile, models, session_id, timeout) -> Dict[str, Any]:
-        """
-        Cost mode: select the single cheapest model across all requested
-        providers using output_per_million rates from llm_providers.json,
-        then execute as a direct call.
-        """
         best_model_str = None
         best_cost      = float("inf")
 
@@ -166,18 +165,17 @@ class LLMRouter:
             cheapest_tag    = config.cheapest_model(provider_key)
             if cheapest_tag is None:
                 continue
-            # Normalised comparison: cost at 1M output tokens
+ 
             cost = config.estimate_cost(cheapest_tag, input_tokens=0, output_tokens=1_000_000)
             if cost is not None and cost < best_cost:
                 best_cost      = cost
                 best_model_str = cheapest_tag
 
         if best_model_str is None:
-            # No costed models found — fall back to first model direct
-            print(f"⚠️  cost mode: no costed models found, falling back to {models[0]}")
+            logging.warning(f"⚠️ cost mode: no costed models found, falling back to {models[0]}")
             best_model_str = models[0]
 
-        print(f"💰 cost mode: selected {best_model_str} (${best_cost:.4f}/1M output tokens)")
+        logging.info(f"💰 cost mode: selected {best_model_str} (${best_cost:.4f}/1M output tokens)")
         return await self._execute_direct(payload, profile, best_model_str, session_id, timeout)
 
     async def _execute_direct_silent(self, payload, profile, model_str, session_id, timeout):
@@ -189,28 +187,28 @@ class LLMRouter:
     # MARK: - Helpers
 
     def _parse_model_string(self, s: str):
-        """Maps model string to (provider_key, model_tag). Matches Swift LLMModel.init(string:)."""
         s = s.lower().strip()
-        if s == "gemini" or s.startswith("gemini-"):       return "gemini", s
-        if s == "claude" or s.startswith("claude-"):       return "claude", s
+        
+        # Route both 'gemini-' and 'gemma-' to the Google Gemini Provider
+        if s == "gemini" or s.startswith("gemini-") or s.startswith("gemma-"): 
+            return "gemini", s
+            
+        if s == "claude" or s.startswith("claude-"):       
+            return "claude", s
+            
         if s in ("openai", "gpt-4o") or s.startswith("gpt-") \
                 or s.startswith("o1") or s.startswith("o3") \
-                or s.startswith("o4"):                      return "openai", s
+                or s.startswith("o4"):                      
+            return "openai", s
+            
         return "unknown", s
 
     def _record_call(self, response: Dict[str, Any], session_id: str, success: bool):
         timestamp = datetime.now()
         ts_human  = timestamp.strftime('%Y-%m-%dT%H:%M:%SZ')
         ts_file   = timestamp.strftime('%Y%m%d%H%M%S')
+        status    = "SUCCESS" if success else "FAILED"
 
-        # Console log
-        print(
-            f"📝 [LOG] {ts_human} | session={session_id} | "
-            f"provider={response['provider']} | model={response['model']} | "
-            f"latency={response['latency_ms']}ms | fallback={response.get('was_fallback', False)}"
-        )
-
-        # File log — YYYYMMDDHHMMSS_{gtin}.txt, compatible with llm_pull.py
         try:
             payload = response.get('payload', {})
             gtin    = (payload.get('product', {}) or {}).get('gtin', '') \
@@ -219,21 +217,22 @@ class LLMRouter:
             raw     = response.get('raw_json', '')
 
             os.makedirs(_RESPONSES_DIR, exist_ok=True)
-            filename = f"{ts_file}_{gtin}.txt"
+            filename = f"{ts_file}_{status}_{gtin}.txt"
 
             with open(os.path.join(_RESPONSES_DIR, filename), 'w', encoding='utf-8') as f:
                 f.write(f"# TIMESTAMP: {ts_human}\n")
+                f.write(f"# STATUS:    {status}\n")
                 f.write(f"# SESSION:   {session_id}\n")
                 f.write(f"# PROVIDER:  {response['provider']}\n")
                 f.write(f"# MODEL:     {response['model']}\n")
-                f.write(f"# LATENCY:   {response['latency_ms']}ms\n")
+                f.write(f"# LATENCY:   {response.get('latency_ms', -1)}ms\n")
                 f.write(f"# FALLBACK:  {response.get('was_fallback', False)}\n")
                 f.write(f"# GTIN:      {gtin}\n")
                 f.write(f"#\n")
-                f.write(raw)
+                f.write(str(raw))
 
         except Exception as e:
-            print(f"  [!] llm_responses write failed: {e}")
+            logging.error(f"llm_responses write failed: {e}")
 
     def _update_latency(self, model_tag: str, latency_ms: int):
         if model_tag not in self._latency_cache:
@@ -242,7 +241,6 @@ class LLMRouter:
             c = self._latency_cache[model_tag]
             c["avg"]   = 0.25 * latency_ms + 0.75 * c["avg"]
             c["count"] += 1
-
 
 # Singleton for Flask app
 router = LLMRouter()

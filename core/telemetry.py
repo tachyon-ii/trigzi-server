@@ -72,6 +72,17 @@ def log_ocr_scan(gtin: str, text_front: str, text_nutrition: str) -> None:
         f"{text_nutrition}\n"
     ))
 
+def log_menu_scan(text: str) -> str:
+    """Log a raw OCR menu scan and return the filename for reference."""
+    filename = f"{_ts()}_menu_scan.txt"
+    _write_scan(filename, (
+        f"TIMESTAMP: {time.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+        f"SOURCE: menu_ocr\n"
+        f"\n"
+        f"=== MENU TEXT ===\n"
+        f"{text}\n"
+    ))
+    return filename
 
 def log_unmatched(gtin: str) -> None:
     """Log an unmatched GTIN to the product acquisition queue."""
