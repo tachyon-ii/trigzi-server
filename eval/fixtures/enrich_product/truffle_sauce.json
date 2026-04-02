@@ -1,0 +1,16 @@
+{
+  "name": "Artisan Truffle & Mushroom Pasta Sauce",
+  "raw_ingredients": "Water, Tomatoes (30%), Cream (Milk), Mushrooms (10%), Truffle Oil (Olive Oil, Truffle Flavour), Modified Corn Starch (1442), Garlic Puree (2%), Onion Powder, Yeast Extract, Sea Salt, Spices, Preservative (202).",
+  "nutrition_100g": {
+    "energy_kj": 450.0,
+    "calories_kcal": 107.0,
+    "protein_g": 1.5,
+    "fat_total_g": 8.0,
+    "fat_saturated_g": 4.5,
+    "carbohydrates_g": 6.0,
+    "sugars_g": 3.5,
+    "fibre_g": 1.2,
+    "sodium_mg": 380.0
+  },
+  "health_star_rating": 3.0
+}

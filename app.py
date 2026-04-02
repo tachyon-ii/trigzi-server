@@ -12,7 +12,7 @@ from quart import Quart, jsonify, request, Response
 
 from core import data_manager
 from core.enricher import enrich
-from core.analyser import analyse_product, analyse_meal, analyse_menu
+from core.analyser import analyse_product, analyse_meal, analyse_menu, chat_assistant, chat_emoji
 from core.telemetry import telemetry_bp, log_ocr_scan, log_menu_scan
 
 # --- BOMB-PROOF FILE LOGGING ---
@@ -142,6 +142,72 @@ async def analyse_menu_route():
         return jsonify({"error": "Analysis failed."}), 500
 
     return jsonify({"status": "ok", "result": result}), 200
+
+@app.route('/api/v1/chat/stream', methods=['POST'])
+async def chat_stream_route():
+    data = await request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid payload."}), 400
+
+    system_context = data.get('system_context', {})
+    history        = data.get('history', [])
+    message        = data.get('message', '')
+
+    if isinstance(message, str): 
+        message = message.strip()
+        
+    if not message:
+        logger.error("Missing message in chat stream request")
+        return jsonify({"error": "Missing message."}), 400
+
+    logger.info(f"Chat stream request received: {message[:30]}...")
+
+    async def generate():
+        # 1. Pipeline Stage 1: The Heavy Lift (Haiku)
+        text = await chat_assistant(system_context, history, message)
+        if not text:
+            yield _sse("error", {"message": "Analysis failed."})
+            return
+            
+        yield _sse("text", {"content": text})
+
+        # 2. Pipeline Stage 2: The UI Flourish (Flash-Lite)
+        emoji = await chat_emoji(text)
+        if emoji:
+            yield _sse("emoji", {"content": f" {emoji}"})
+            
+        yield _sse("done", {})
+
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control':     'no-cache',
+        'X-Accel-Buffering': 'no',
+        'Connection':        'keep-alive',
+    })
+
+@app.route('/api/v1/chat/emoji', methods=['POST'])
+async def chat_emoji_route():
+    """
+    Isolated testing endpoint for the tone-evaluation micro-inference task.
+    """
+    data = await request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid payload."}), 400
+
+    text = data.get('text', '')
+    if isinstance(text, str):
+        text = text.strip()
+
+    if not text:
+        return jsonify({"error": "Missing 'text' field to analyze."}), 400
+
+    # Hit the micro-inference function directly
+    emoji = await chat_emoji(text)
+
+    # Return the result (even if it's an empty string for safety)
+    return jsonify({
+        "status": "ok",
+        "emoji": emoji
+    }), 200
 
 if __name__ == '__main__':
     import asyncio

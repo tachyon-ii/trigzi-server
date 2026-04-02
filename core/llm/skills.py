@@ -45,3 +45,17 @@ class SkillsLibrary:
     def analyse_menu_prompt(ocr_text: str) -> str:
         template = SkillsLibrary._load_prompt('analyse_menu.txt')
         return template.format(menu_text=ocr_text)
+
+    @staticmethod
+    def chat_assistant_prompt(system_context: str, history: str, message: str) -> str:
+        template = SkillsLibrary._load_prompt('chat_assistant.txt')
+        return template.format(
+            system_context=system_context,
+            history=history,
+            message=message
+        )
+  
+    @staticmethod
+    def chat_emoji_prompt(text: str) -> str:
+        template = SkillsLibrary._load_prompt('chat_emoji.txt')
+        return template.format(text=text)

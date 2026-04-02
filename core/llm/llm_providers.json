@@ -152,6 +152,31 @@
         ],
         "optimize": "failover",
         "timeout": 12
+      },
+      "enrich_product": {
+        "models": [
+          "gpt-4o",
+          "claude-sonnet-4-6"
+        ],
+        "optimize": "accuracy",
+        "timeout": 30
+      },
+      "chat_assistant": {
+        "models": [
+          "claude-haiku-4-5-20251001",
+          "gpt-5.4-mini",
+          "gemini-2.5-flash"
+        ],
+        "optimize": "failover",
+        "timeout": 12
+      },
+      "chat_emoji": {
+        "models": [
+          "gemini-2.5-flash-lite",
+          "gpt-4.1-mini"
+        ],
+        "optimize": "speed",
+        "timeout": 3
       }
     }
 }

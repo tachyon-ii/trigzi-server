@@ -1,0 +1,28 @@
+{
+  "system_context": {
+    "dietary_profile": {
+      "allergies": ["Tree Nuts", "Peanuts"],
+      "sensitivities": ["FODMAP (High)"],
+      "strictness": "Medical/Anaphylactic"
+    },
+    "current_menu": [
+      {
+        "name": "Roasted Beetroot Salad",
+        "isSafe": false,
+        "flagged": ["walnuts", "garlic dressing"],
+        "suspected": ["cross-contamination"]
+      },
+      {
+        "name": "Grilled Salmon",
+        "isSafe": true,
+        "flagged": [],
+        "suspected": []
+      }
+    ]
+  },
+  "history": [
+    {"role": "user", "content": "Is the beetroot salad safe for me?"},
+    {"role": "model", "content": "No. The Roasted Beetroot Salad is unsafe. It contains walnuts (Tree Nut allergy) and garlic dressing (High FODMAP sensitivity)."}
+  ],
+  "message": "Can I just ask them to take the walnuts off?"
+}

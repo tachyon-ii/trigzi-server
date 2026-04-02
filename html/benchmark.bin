@@ -9,12 +9,15 @@ from pathlib import Path
 import uuid
 
 # 1. Bootstrap the Python path BEFORE importing local modules.
+# This tells Python that the root 'trigzi' folder is a valid place to look for packages.
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
+# 2. Use absolute imports now that the path is aware of the root directory
 from core.llm.router import LLMRouter 
 from core.llm.skills import SkillsLibrary
 
+# Instantiate your router
 llm_router = LLMRouter()
 
 # --- Configuration & Paths ---
@@ -27,19 +30,33 @@ def load_providers():
         sys.exit(1)
     with open(PROVIDERS_FILE, 'r') as f:
         providers = json.load(f)
-    print(f"✅ LLMProviderConfig: loaded {len(providers)} providers from {PROVIDERS_FILE.name}")
+    print(f"✅ LLMProviderConfig: loaded {len(providers)} providers from {PROVIDERS_FILE}")
     return providers
 
 def get_task_payload_and_prompt(task, content):
     """
     Router for building the strict API payload based on the task name.
     """
-    if task == "chat_assistant":
+    if task == "enrich_product":
+        system_prompt = (
+            "You are a strictly clinical dietary analysis engine. "
+            "Analyze the provided product JSON for hidden allergens and dietary risks. "
+            "Output your analysis strictly in flat JSON format."
+        )
+        user_prompt = f"[PRODUCT DATA]\n{content}\n\n[OUTPUT FORMAT]\nReturn strictly JSON."
+        payload = {
+            "prompt": f"{system_prompt}\n\n{user_prompt}" # Ensure it uses the 'prompt' key!
+        }
+        return payload, user_prompt
+
+    elif task == "chat":
         data = json.loads(content)
+        
         ctx_str = (
             f"Dietary Profile: {json.dumps(data.get('system_context', {}).get('dietary_profile', {}))}\n"
             f"Active Menu Context: {json.dumps(data.get('system_context', {}).get('current_menu', []))}"
         )
+        
         hist_str = ""
         for msg in data.get("history", []):
             role = "User" if msg.get("role") == "user" else "Trigzi"
@@ -50,36 +67,40 @@ def get_task_payload_and_prompt(task, content):
             history=hist_str,
             message=data.get("message", "")
         )
-        return {"prompt": prompt}, prompt
 
-    elif task == "chat_emoji":
-        # For the emoji micro-inference, the fixture is just the raw text string to analyze
-        prompt = SkillsLibrary.chat_emoji_prompt(text=content.strip())
-        return {"prompt": prompt}, prompt
-
-    elif task == "enrich_product":
-        system_prompt = (
-            "You are a strictly clinical dietary analysis engine. "
-            "Analyze the provided product JSON for hidden allergens and dietary risks. "
-            "Output your analysis strictly in flat JSON format."
-        )
-        user_prompt = f"[PRODUCT DATA]\n{content}\n\n[OUTPUT FORMAT]\nReturn strictly JSON."
-        return {"prompt": f"{system_prompt}\n\n{user_prompt}"}, user_prompt
+        # THE CRITICAL FIX: Wrap it in the abstract "prompt" key 
+        # so BaseProvider passes it to RequestFilter.build_text_payload
+        payload = {
+            "prompt": prompt 
+        }
+        return payload, prompt
 
     raise ValueError(f"Payload builder not implemented for task: '{task}'")
 
 async def execute_llm_request(model_name, payload):
-    """Executes a strict, 1:1 API call via the core router."""
+    """
+    Executes a strict, 1:1 API call via the core router.
+    Bypasses standard routing logic (failovers/races) to ensure clean benchmark data.
+    """
     session_id = f"bench-{uuid.uuid4().hex[:8]}"
+    
     try:
+        # Hitting the internal method to guarantee a direct API strike
         result = await llm_router._execute_direct(
             payload=payload,
-            profile="benchmark", 
+            profile="benchmark", # Adjust if your router expects a specific string here
             model_str=model_name,
             session_id=session_id,
             timeout=45.0
         )
+        
+        # Your router returns a Dict[str, Any]. 
+        # Depending on how your router normalizes responses, extract the text here.
+        # It's likely something like result.get('content') or result['choices'][0]['message']['content']
+        
+        # For now, let's pretty-print the raw dictionary so you can see exactly what comes back:
         return json.dumps(result, indent=2)
+        
     except Exception as e:
         return f"❌ Router Exception: {str(e)}"
 
@@ -91,6 +112,7 @@ async def evaluate_model(model_name, task, content):
         print(f"📡 Sending request to {model_name}...")
         
         response = await execute_llm_request(model_name, payload)
+        
         elapsed = time.time() - start_time
         return {
             "model": model_name,
@@ -109,53 +131,51 @@ async def evaluate_model(model_name, task, content):
 
 async def main():
     parser = argparse.ArgumentParser(description="Run LLM benchmarking tasks.")
-    parser.add_argument("task", help="Task name mapping to llm_providers.json (e.g., chat_assistant, chat_emoji)")
-    parser.add_argument("-f", "--fixture", help="Explicit path to a JSON/text fixture file")
-    parser.add_argument("-m", "--models", help="Comma-separated list of models to test (overrides config)")
+    parser.add_argument("task", help="The specific benchmark task to run (e.g., enrich_product, chat)")
+    parser.add_argument("-v", "--verbosity", type=int, default=1, help="Output verbosity level")
     args = parser.parse_args()
 
     providers = load_providers()
 
-    # Determine Target Models
-    if args.models:
-        target_models = [m.strip() for m in args.models.split(",")]
-        print("⚠️  Overriding config with CLI model selection.")
-    else:
-        routing_config = providers.get("routing", {}).get(args.task, {})
-        target_models = routing_config.get("models", [])
-        if not target_models:
-            print(f"❌ CRITICAL ERROR: No 'models' array found for task '{args.task}' in llm_providers.json.")
-            sys.exit(1)
+    # Dynamically read models from llm_providers.json routing config
+    routing_config = providers.get("routing", {}).get(args.task, {})
+    target_models = routing_config.get("models", [])
+    
+    # The 2026 Featherweight Division
+    #target_models = [
+    #    "gemini-2.5-flash-lite",
+    #    "claude-haiku-4-5-20251001",
+    #    "gpt-5.4-nano"
+    #]
 
     print(f"🚀 Initializing Benchmark Pipeline for task: {args.task}")
     print(f"📡 Target Models: {', '.join(target_models)}")
 
-    # Determine Fixture Path
-    if args.fixture:
-        fixture_path = Path(args.fixture)
+    # 1. Dynamically select the fixture based on the task
+    if args.task == "chat":
+        fixture_name = "chat_eval.json"
     else:
-        # Default convention: tests/fixtures/<task_name>_eval.json
-        fixture_path = FIXTURES_DIR / f"{args.task}_eval.json"
-        
-        # Fallback for older naming conventions (like truffle_sauce) if needed
-        if not fixture_path.exists() and args.task == "enrich_product":
-            fixture_path = FIXTURES_DIR / "truffle_sauce.json"
+        fixture_name = "truffle_sauce.json"
 
+    fixture_path = FIXTURES_DIR / fixture_name
+    
+    # 2. THE HARD ABORT: Fail fast and loud if the contract is broken
     if not fixture_path.exists():
-        print(f"❌ CRITICAL ERROR: Fixture file not found at {fixture_path}")
-        print(f"Pass a specific file using the -f flag: ./benchmark_task.py {args.task} -f path/to/file.json")
+        print(f"❌ CRITICAL ERROR: Fixture file not found.")
+        print(f"Expected path: {fixture_path}")
+        print(f"Please ensure '{fixture_name}' exists in the tests/fixtures/ directory before running the '{args.task}' benchmark.")
         sys.exit(1)
 
-    print(f"📁 Loaded fixture: {fixture_path.name}\n")
+    print(f"📁 Found fixture at {fixture_path.name}. Beginning evaluation...\n")
 
-    with open(fixture_path, 'r', encoding='utf-8') as file:
-        content = file.read()
+    with open(fixture_path, 'r', encoding='utf-8') as f:
+        content = f.read()
 
-    # Fan out concurrently
+    # 3. Fan out to all models concurrently
     tasks = [evaluate_model(model, args.task, content) for model in target_models]
     results = await asyncio.gather(*tasks)
 
-    # Output
+    # 4. Output Results
     print("-" * 50)
     print("🏆 BENCHMARK RESULTS")
     print("-" * 50)
@@ -167,6 +187,7 @@ async def main():
             print(f"🔴 {model} ({res['time']}s) FAILED:\n{res['error']}\n")
 
 if __name__ == "__main__":
+    # Prevent "Event loop is closed" errors on Windows/certain environments
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

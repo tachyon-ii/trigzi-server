@@ -4,13 +4,12 @@ from __future__ import annotations
 #  core/analyser.py
 #
 
-import json
 from typing import Optional
+import json
 
 from core.llm.router import router
 from core.llm.skills import SkillsLibrary
 from core.llm.config import config as llm_config
-
 
 async def analyse_product(
     gtin:           str,
@@ -134,15 +133,14 @@ async def analyse_menu(text: str) -> Optional[dict]:
         print(f"  [!] analyse_menu failed: {e}")
         return None
 
-# ---------------------------------------------------------------------------
-# Chat Pipeline (Pipelined for SSE Streaming)
-# ---------------------------------------------------------------------------
-
-async def chat_assistant(system_context: dict, history: list, message: str) -> Optional[str]:
-    """Task 1: Generate the clinical response text."""
+    async def chat_assistant(system_context: dict, history: list, message: str) -> Optional[str]:
+    """
+    Processes a follow-up chat query using the existing router architecture.
+    """
     if not message:
         return None
 
+    # 1. Format dictionaries into readable context strings
     ctx_str = (
         f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}\n"
         f"Active Menu Context: {json.dumps(system_context.get('current_menu', []))}"
@@ -153,26 +151,27 @@ async def chat_assistant(system_context: dict, history: list, message: str) -> O
         role = "User" if msg.get("role") == "user" else "Trigzi"
         hist_str += f"{role}: {msg.get('content', '')}\n"
 
+    # 2. Compile via the validated SkillsLibrary contract
     prompt = SkillsLibrary.chat_assistant_prompt(
         system_context=ctx_str,
         history=hist_str,
         message=message
     )
 
-    # DYNAMIC CONFIG ROUTING
-    _cfg = llm_config.task_config("chat_assistant")
+    _cfg = llm_config.task_config("chat")
 
     try:
         response = await router.analyze(
-            payload       = {"prompt": prompt},
+            payload       = {"prompt": prompt}, # Abstract key triggers RequestFilter
             profile       = "", 
-            model_strings = _cfg["models"], 
-            optimize      = _cfg.get("optimize", "failover"),
-            timeout       = _cfg.get("timeout", 12),
+            model_strings = _cfg["models"],
+            optimize      = "cost", 
+            timeout       = _cfg["timeout"],
         )
         
         raw_text = str(response.get("result", "")).strip()
         
+        # 3. Strip the schema contract keys from the final user response
         if raw_text.lower().startswith("response:"):
             raw_text = raw_text[9:]
             
@@ -182,33 +181,37 @@ async def chat_assistant(system_context: dict, history: list, message: str) -> O
         print(f"  [!] chat_assistant failed: {e}")
         return None
 
+def get_task_payload_and_prompt(task, content):
+    """
+    Router for building the strict API payload based on the task name.
+    """
+    if task == "enrich_product":
+        # ... existing logic ...
+        pass
 
-async def chat_emoji(text: str) -> str:
-    """Task 2: Micro-inference to safely append an emoji."""
-    if not text:
-        return ""
+    elif task == "chat":
+        data = json.loads(content)
+        
+        ctx_str = (
+            f"Dietary Profile: {json.dumps(data.get('system_context', {}).get('dietary_profile', {}))}\n"
+            f"Active Menu Context: {json.dumps(data.get('system_context', {}).get('current_menu', []))}"
+        )
+        
+        hist_str = ""
+        for msg in data.get("history", []):
+            role = "User" if msg.get("role") == "user" else "Trigzi"
+            hist_str += f"{role}: {msg.get('content', '')}\n"
 
-    prompt = SkillsLibrary.chat_emoji_prompt(text=text)
-
-    # DYNAMIC CONFIG ROUTING
-    _cfg = llm_config.task_config("chat_emoji")
-
-    try:
-        response = await router.analyze(
-            payload       = {"prompt": prompt},
-            profile       = "",
-            model_strings = _cfg["models"], 
-            optimize      = _cfg.get("optimize", "speed"), 
-            timeout       = _cfg.get("timeout", 3.0),
+        # USE THE VALIDATED SKILL
+        prompt = SkillsLibrary.chat_assistant_prompt(
+            system_context=ctx_str,
+            history=hist_str,
+            message=data.get("message", "")
         )
 
-        emoji_str = str(response.get("result", "")).strip()
-        
-        if not emoji_str or "none" in emoji_str.lower():
-            return ""
-            
-        return emoji_str[0] 
+        payload = {
+            "prompt": prompt # Triggers RequestFilter.build_text_payload
+        }
+        return payload, prompt
 
-    except Exception as e:
-        print(f"  [!] chat_emoji failed: {e}")
-        return ""
+    raise ValueError(f"Payload builder not implemented for task: '{task}'")
