@@ -59,3 +59,11 @@ class SkillsLibrary:
     def chat_emoji_prompt(text: str) -> str:
         template = SkillsLibrary._load_prompt('chat_emoji.txt')
         return template.format(text=text)
+
+    @staticmethod
+    def onboarding_prompt(message: str, fallback_name: str) -> str:
+        template = SkillsLibrary._load_prompt('onboarding.txt')
+        return template.format(
+            message=message,
+            fallback_name=fallback_name
+        )

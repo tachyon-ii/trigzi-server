@@ -11,8 +11,9 @@ import logging
 from quart import Quart, jsonify, request, Response
 
 from core import data_manager
+from core.db import init_pool, close_pool
 from core.enricher import enrich
-from core.analyser import analyse_product, analyse_meal, analyse_menu, chat_assistant, chat_emoji
+from core.analyser import analyse_product, analyse_meal, analyse_menu, chat_assistant, chat_emoji, onboarding_assistant
 from core.telemetry import telemetry_bp, log_ocr_scan, log_menu_scan
 
 # --- BOMB-PROOF FILE LOGGING ---
@@ -32,10 +33,18 @@ app.register_blueprint(telemetry_bp)
 MIN_GTIN_LEN = 8
 MAX_GTIN_LEN = 14
 
+@app.before_serving
+async def startup():
+    """Run once before the server starts accepting requests."""
+    await init_pool()
+
+@app.after_serving
+async def shutdown():
+    """Run once when the server is shutting down."""
+    await close_pool()
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
 
 @app.route('/api/v1/product/<gtin>', methods=['GET'])
 async def get_product(gtin):
@@ -44,7 +53,7 @@ async def get_product(gtin):
     if not gtin.isdigit() or not (MIN_GTIN_LEN <= len(gtin) <= MAX_GTIN_LEN):
         return jsonify({"error": "Invalid barcode."}), 400
 
-    record = data_manager.get_product(gtin)
+    record = await data_manager.get_product(gtin)
 
     if not record:
         return jsonify({"status": "not_found", "gtin": gtin}), 404
@@ -69,7 +78,6 @@ async def get_product(gtin):
         'Connection':        'keep-alive',
     })
 
-
 @app.route('/api/v1/analyse/product', methods=['POST'])
 async def analyse_product_route():
     data = await request.get_json()
@@ -93,14 +101,13 @@ async def analyse_product_route():
 
     return jsonify({"status": "ok", "result": result}), 200
 
-
 @app.route('/api/v1/analyse/meal', methods=['POST'])
 async def analyse_meal_route():
     data = await request.get_json()
     if not data:
         return jsonify({"error": "Invalid payload."}), 400
 
-    image   = data.get('image', '')
+    image = data.get('image', '')
     profile = data.get('profile', {})
 
     if isinstance(image, str): image = image.strip()
@@ -117,7 +124,6 @@ async def analyse_meal_route():
         return jsonify({"error": "Analysis failed."}), 500
 
     return jsonify({"status": "ok", "result": result}), 200
-
 
 @app.route('/api/v1/analyse/menu', methods=['POST'])
 async def analyse_menu_route():
@@ -209,10 +215,57 @@ async def chat_emoji_route():
         "emoji": emoji
     }), 200
 
+@app.route('/api/v1/chat/onboarding', methods=['POST'])
+async def chat_onboarding_route():
+    data = await request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid payload."}), 400
+
+    message = data.get('message', '')
+    fallback_name = data.get('fallback_name', 'Zesty Koala')
+
+    if isinstance(message, str): 
+        message = message.strip()
+        
+    if not message:
+        logger.error("Missing message in onboarding stream request")
+        return jsonify({"error": "Missing message."}), 400
+
+    logger.info(f"Onboarding stream request received: {message[:30]}...")
+
+    async def generate():
+        try:
+            # 1. The Heavy Lift: Get parsed events and the raw text
+            events, text_content = await onboarding_assistant(message, fallback_name)
+            
+            # 2. BANG ON WIRE: Instantly flush text, facts, and actions to iOS
+            for evt in events:
+                yield _sse(evt["event"], evt["data"])
+
+            # 3. PAUSE & EVALUATE: Run micro-inference while the user is reading
+            if text_content:
+                emoji = await chat_emoji(text_content)
+                if emoji:
+                    yield _sse("emoji", {"content": f" {emoji}"})
+
+            # 4. CLOSE
+            yield _sse("done", {})
+            
+        except Exception as e:
+            logger.error(f"Stream crashed: {str(e)}", exc_info=True)
+            yield _sse("error", {"message": "Analysis failed."})
+
+    # This must be outdented to align with `async def generate():`
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control':     'no-cache',
+        'X-Accel-Buffering': 'no',
+        'Connection':        'keep-alive',
+    })
+
 if __name__ == '__main__':
-    import asyncio
     from hypercorn.config import Config
     from hypercorn.asyncio import serve
+    import asyncio
     config = Config()
     config.bind = ["127.0.0.1:5000"]
     asyncio.run(serve(app, config))

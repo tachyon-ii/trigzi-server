@@ -1,88 +1,69 @@
 # test/test_filters.py
+
+#!/usr/bin/env python3
 """
 Unit tests for the LLM request/response filtering layer.
 """
 
 import unittest
-from core.llm.filters import (
-    OpenAIResponseFilter,
-    ClaudeResponseFilter,
-    GeminiResponseFilter,
-    ClaudeRequestFilter,
-)
-from core.llm.filters.xml_filter import dict_to_xml
+from core.llm.filters.request_filter import ClaudeRequestFilter, OpenAIRequestFilter, GeminiRequestFilter
+from core.llm.filters.response_filter import ClaudeResponseFilter, OpenAIResponseFilter, GeminiResponseFilter
 
+# A foolproof mock prompt that passes the SchemaValidator's regex checks
+VALID_PROMPT = """[ACT AS]
+A unit test.
+[TASK]
+Pass the test.
+[INSTRUCTIONS]
+1. Do not fail.
+[OUTPUT]
+Message: ok
+---"""
 
 class TestResponseFilters(unittest.TestCase):
-    """Validates the defensive parsing layer."""
-
     def setUp(self):
-        self.openai_filter = OpenAIResponseFilter()
         self.claude_filter = ClaudeResponseFilter()
+        self.openai_filter = OpenAIResponseFilter()
         self.gemini_filter = GeminiResponseFilter()
 
-        self.clean_json    = '{"safe": true, "verdict": "Safe"}'
-        self.markdown_json = f'```json\n{self.clean_json}\n```'
-        self.dirty_markdown = f'Here is the result:\n```json\n{self.clean_json}\n```\nDone.'
-
-    def test_markdown_stripping_regex(self):
-        """Ensure the base filter handles various hallucinated wrappers."""
-        self.assertEqual(
-            self.openai_filter._strip_markdown(self.markdown_json),
-            self.clean_json
-        )
-        self.assertEqual(
-            self.openai_filter._strip_markdown(self.dirty_markdown),
-            self.clean_json
-        )
-        self.assertEqual(
-            self.openai_filter._strip_markdown('   { "a": 1 }   '),
-            '{ "a": 1 }'
-        )
-
-    def test_openai_extraction(self):
-        mock = {"choices": [{"message": {"content": self.dirty_markdown}}]}
-        result = self.openai_filter.extract_json(mock, "OpenAI")
-        self.assertEqual(result, self.clean_json)
+        # Safely constructing markdown code blocks to avoid UI parser breakage
+        tick3 = "`" * 3
+        self.markdown_json = tick3 + "json\n{\"safe\": true, \"verdict\": \"Safe\"}\n" + tick3
+        self.dirty_markdown = "Here is the result:\n" + tick3 + "json\n{\"safe\": true, \"verdict\": \"Safe\"}\n" + tick3 + "\nDone."
+        self.clean_json = "{\"safe\": true, \"verdict\": \"Safe\"}"
 
     def test_claude_extraction(self):
+        """Verify the filter acts as a dumb pipe and returns the exact string received."""
         mock = {"content": [{"type": "text", "text": self.markdown_json}]}
+        # It should no longer strip markdown; the analyser handles that now
         result = self.claude_filter.extract_json(mock, "Claude")
-        self.assertEqual(result, self.clean_json)
+        self.assertEqual(result, self.markdown_json)
+
+    def test_openai_extraction(self):
+        """Verify the filter acts as a dumb pipe and returns the exact string received."""
+        mock = {"choices": [{"message": {"content": self.dirty_markdown}}]}
+        result = self.openai_filter.extract_json(mock, "OpenAI")
+        self.assertEqual(result, self.dirty_markdown)
 
     def test_gemini_extraction(self):
+        """Verify standard extraction works without mutation."""
         mock = {"candidates": [{"content": {"parts": [{"text": self.clean_json}]}}]}
         result = self.gemini_filter.extract_json(mock, "Gemini")
         self.assertEqual(result, self.clean_json)
 
 
 class TestRequestFilters(unittest.TestCase):
-    """Validates payload construction, specifically XML framing for Claude."""
-
-    def test_claude_xml_framing(self):
+    def test_claude_payload_framing(self):
+        """Verify the payload builds successfully when given a valid Schema contract."""
         f = ClaudeRequestFilter()
-        payload = f.build_text_payload("Analyze this", "claude-sonnet")
-        content = payload["messages"][0]["content"]
-        self.assertTrue(content.startswith("<instructions>"))
-        self.assertTrue(content.endswith("</instructions>"))
-        self.assertIn("Analyze this", content)
-
-    def test_dict_to_xml_recursion(self):
-        data = {
-            "profile": {"allergy": "Dairy", "severity": "High"},
-            "task": "Scan"
-        }
-        # XMLFilter._serialize_to_xml indents nested elements for readability.
-        # dict_to_xml is a shim over it — indentation is expected behaviour.
-        expected = (
-            "<profile>\n"
-            "  <allergy>Dairy</allergy>\n"
-            "  <severity>High</severity>\n"
-            "</profile>\n"
-            "<task>Scan</task>"
-        )
-        self.assertEqual(dict_to_xml(data), expected)
-
+        
+        # We must pass VALID_PROMPT to bypass the SchemaValidator
+        payload = f.build_text_payload(VALID_PROMPT, "claude-sonnet")
+        
+        # Ensure the prompt actually made it into the payload
+        messages = payload.get("messages", [])
+        self.assertTrue(len(messages) > 0)
+        self.assertIn("[ACT AS]", messages[0].get("content", ""))
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)

@@ -58,7 +58,6 @@ def _queue_for_validation(record: dict) -> None:
     except Exception as e:
         print(f"  [!] validate queue write failed: {e}")
 
-
 async def enrich(record: dict) -> dict:
     """
     Enrich a raw product record with a clinical profile.
@@ -90,6 +89,7 @@ async def enrich(record: dict) -> dict:
                 optimize      = _cfg["optimize"],
                 timeout       = _cfg["timeout"],
             )
+        
             profile_data = response.get("result")
             llm_model    = response.get("model", "router")
         except Exception as e:
@@ -100,7 +100,7 @@ async def enrich(record: dict) -> dict:
         enriched["clinical_profile"] = profile_data
         enriched["_enrichment_llm"]  = llm_model
 
-        enrichment_id = get_or_create_enrichment(
+        enrichment_id = await get_or_create_enrichment(
             task        = "product",
             llm_model   = llm_model,
             prompt_ver  = PROMPT_VER,
@@ -108,9 +108,9 @@ async def enrich(record: dict) -> dict:
         )
 
         _queue_for_validation(enriched)
-        _off.save(enriched, enrichment_id=enrichment_id)
+        await _off.save(enriched, enrichment_id=enrichment_id)
     else:
         enriched["_enrichment_llm"] = "FAILED"
-        _off.save(enriched, enrichment_id=None)
+        await _off.save(enriched, enrichment_id=None)
 
     return enriched

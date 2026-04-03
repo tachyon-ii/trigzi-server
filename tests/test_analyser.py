@@ -7,12 +7,15 @@ from __future__ import annotations
 #  All LLM router calls are mocked -- no real API calls made.
 #
 
+import json
 import unittest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
+
+import logging
+logging.disable(logging.CRITICAL) # Mute expected exception logs during test runs
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -26,8 +29,18 @@ MOCK_RESULT = {
                "detailedReason": "No flagged ingredients."}]
 }
 
-MOCK_ROUTER_RESPONSE = {
-    "result":       MOCK_RESULT,
+# For product and meal (which expect JSON string back from router)
+MOCK_ROUTER_JSON_RESPONSE = {
+    "result":       json.dumps(MOCK_RESULT),
+    "model":        "gemini-2.5-flash",
+    "provider":     "Gemini",
+    "latency_ms":   320,
+    "was_fallback": False,
+}
+
+# For menu (which expects flat text back from router)
+MOCK_ROUTER_MENU_RESPONSE = {
+    "result":       "Dish: Pad Thai\nListed: noodles, egg\nSuspected: \n---",
     "model":        "gemini-2.5-flash",
     "provider":     "Gemini",
     "latency_ms":   320,
@@ -44,7 +57,7 @@ class TestAnalyseProduct(unittest.IsolatedAsyncioTestCase):
     async def test_returns_result_on_success(self):
         from core.analyser import analyse_product
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_RESPONSE
+            mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             result = await analyse_product(
                 gtin="0070177161170",
                 text_front="Brand Name Crackers",
@@ -53,10 +66,9 @@ class TestAnalyseProduct(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, MOCK_RESULT)
 
     async def test_payload_contains_combined_text(self):
-        """Both front and nutrition text should be included in the payload."""
         from core.analyser import analyse_product
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_RESPONSE
+            mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             await analyse_product(
                 gtin="0070177161170",
                 text_front="Front label text",
@@ -84,11 +96,16 @@ class TestAnalyseProduct(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIsNone(result)
 
-    async def test_uses_accuracy_optimize(self):
+    async def test_uses_config_routing(self):
+        """Optimization strategy should be pulled from the dynamic config."""
         from core.analyser import analyse_product
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_RESPONSE
+        mock_cfg = {"models": ["gemini"], "optimize": "accuracy", "timeout": 30}
+        
+        with patch("core.analyser.llm_config.task_config", return_value=mock_cfg), \
+             patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             await analyse_product("x", "front", "nutrition")
+        
         self.assertEqual(mock.call_args.kwargs["optimize"], "accuracy")
 
 
@@ -101,15 +118,14 @@ class TestAnalyseMeal(unittest.IsolatedAsyncioTestCase):
     async def test_returns_result_on_success(self):
         from core.analyser import analyse_meal
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_RESPONSE
+            mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             result = await analyse_meal(image="base64data==", profile="Low FODMAP")
         self.assertEqual(result, MOCK_RESULT)
 
     async def test_payload_uses_image_base64_key(self):
-        """Meal analysis must send image_base64 so base.py routes to multimodal."""
         from core.analyser import analyse_meal
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_RESPONSE
+            mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             await analyse_meal(image="base64data==", profile="")
         payload = mock.call_args.kwargs["payload"]
         self.assertIn("image_base64", payload)
@@ -118,7 +134,7 @@ class TestAnalyseMeal(unittest.IsolatedAsyncioTestCase):
     async def test_profile_forwarded_to_router(self):
         from core.analyser import analyse_meal
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_RESPONSE
+            mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             await analyse_meal(image="data==", profile="Dairy Free")
         self.assertEqual(mock.call_args.kwargs["profile"], "Dairy Free")
 
@@ -146,23 +162,26 @@ class TestAnalyseMenu(unittest.IsolatedAsyncioTestCase):
     async def test_returns_result_on_success(self):
         from core.analyser import analyse_menu
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_RESPONSE
-            result = await analyse_menu(text="Pad Thai $18\nGreen Curry $20", profile="Nut allergy")
-        self.assertEqual(result, MOCK_RESULT)
+            mock.return_value = MOCK_ROUTER_MENU_RESPONSE
+            result = await analyse_menu(text="Pad Thai $18\nGreen Curry $20")
+            
+        self.assertEqual(result["type"], "menu")
+        self.assertEqual(result["items"][0]["name"], "Pad Thai")
+        self.assertEqual(result["items"][0]["listed_ingredients"], ["noodles", "egg"])
 
-    async def test_payload_uses_text_key(self):
+    async def test_payload_uses_menu_text_key(self):
         from core.analyser import analyse_menu
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_RESPONSE
-            await analyse_menu(text="menu text", profile="")
+            mock.return_value = MOCK_ROUTER_MENU_RESPONSE
+            await analyse_menu(text="menu text")
         payload = mock.call_args.kwargs["payload"]
-        self.assertIn("text", payload)
-        self.assertEqual(payload["text"], "menu text")
+        self.assertIn("menu_text", payload)
+        self.assertEqual(payload["menu_text"], "menu text")
 
     async def test_returns_none_for_empty_text(self):
         from core.analyser import analyse_menu
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            result = await analyse_menu(text="", profile="")
+            result = await analyse_menu(text="")
         self.assertIsNone(result)
         mock.assert_not_called()
 
@@ -170,18 +189,94 @@ class TestAnalyseMenu(unittest.IsolatedAsyncioTestCase):
         from core.analyser import analyse_menu
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
             mock.side_effect = RuntimeError("provider down")
-            result = await analyse_menu(text="some menu", profile="")
+            result = await analyse_menu(text="some menu")
         self.assertIsNone(result)
 
-    async def test_uses_three_default_models(self):
-        """Failover chain should include all three providers."""
-        from core.analyser import analyse_menu, DEFAULT_MODELS
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_RESPONSE
-            await analyse_menu(text="menu", profile="")
+    async def test_uses_config_models(self):
+        """Failover chain should pull models from the JSON config."""
+        from core.analyser import analyse_menu
+        mock_cfg = {"models": ["m1", "m2"], "optimize": "failover", "timeout": 10}
+        
+        with patch("core.analyser.llm_config.task_config", return_value=mock_cfg), \
+             patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = MOCK_ROUTER_MENU_RESPONSE
+            await analyse_menu(text="menu")
+            
         models = mock.call_args.kwargs["model_strings"]
-        self.assertEqual(set(models), set(DEFAULT_MODELS))
+        self.assertEqual(list(models), ["m1", "m2"])
 
+
+# ---------------------------------------------------------------------------
+# onboarding_assistant
+# ---------------------------------------------------------------------------
+
+class TestOnboardingAssistant(unittest.IsolatedAsyncioTestCase):
+
+    async def test_successful_parsing(self):
+        """Verify the flat-text protocol is perfectly diced into SSE event dictionaries."""
+        from core.analyser import onboarding_assistant
+        
+        mock_raw_response = (
+            "Message: Fine, I'll call you Zesty Koala. Ready for the tour?\n"
+            "Fact: user_name=Zesty Koala\n"
+            "Action: set_name|Zesty Koala\n"
+            "---"
+        )
+        
+        mock_router_response = {
+            "result": mock_raw_response,
+            "model": "gemini-2.5-flash",
+            "provider": "Gemini",
+        }
+
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = mock_router_response
+            
+            events, text_content = await onboarding_assistant("Whatever.", "Zesty Koala")
+            
+            # Check the raw text extraction for the emoji pipeline
+            self.assertEqual(text_content, "Fine, I'll call you Zesty Koala. Ready for the tour?")
+            
+            # Check the parsed events
+            self.assertEqual(len(events), 3)
+            self.assertEqual(events[0], {"event": "text", "data": {"content": "Fine, I'll call you Zesty Koala. Ready for the tour?"}})
+            self.assertEqual(events[1], {"event": "fact", "data": {"key": "user_name", "value": "Zesty Koala"}})
+            self.assertEqual(events[2], {"event": "action", "data": {"tool": "set_name", "param": "Zesty Koala"}})
+
+    async def test_parameterless_action_parsing(self):
+        """Verify actions without a pipe parameter are handled cleanly."""
+        from core.analyser import onboarding_assistant
+        
+        mock_raw_response = "Action: start_tour\n---"
+        
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = {"result": mock_raw_response}
+            events, _ = await onboarding_assistant("Yes", "Zesty Koala")
+            
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0], {"event": "action", "data": {"tool": "start_tour", "param": ""}})
+
+    async def test_returns_error_for_empty_message(self):
+        """Verify the pipeline bails early if no message is provided."""
+        from core.analyser import onboarding_assistant
+        
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            events, text = await onboarding_assistant("", "Zesty Koala")
+            
+        self.assertEqual(events[0]["event"], "error")
+        self.assertEqual(text, "")
+        mock.assert_not_called()
+
+    async def test_returns_error_on_router_exception(self):
+        """Verify the parser degrades gracefully if the LLM fails or times out."""
+        from core.analyser import onboarding_assistant
+        
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.side_effect = Exception("LLM Timeout")
+            events, text = await onboarding_assistant("Hello", "Zesty Koala")
+            
+        self.assertEqual(events[0]["event"], "error")
+        self.assertEqual(text, "")
 
 if __name__ == "__main__":
     unittest.main()

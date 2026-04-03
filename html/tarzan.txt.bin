@@ -1,7 +1,10 @@
-# tarzan.py snapshot - 2026-04-02 15:31
+# tarzan.py snapshot - 2026-04-03 10:59
 # root: /var/www/trigzi
 # files: 46
 
+==============
+#  app.py
+==============
 ==============
 #  app.py
 ==============
@@ -18,8 +21,9 @@ import logging
 from quart import Quart, jsonify, request, Response
 
 from core import data_manager
+from core.db import init_pool, close_pool
 from core.enricher import enrich
-from core.analyser import analyse_product, analyse_meal, analyse_menu
+from core.analyser import analyse_product, analyse_meal, analyse_menu, chat_assistant, chat_emoji
 from core.telemetry import telemetry_bp, log_ocr_scan, log_menu_scan
 
 # --- BOMB-PROOF FILE LOGGING ---
@@ -39,10 +43,18 @@ app.register_blueprint(telemetry_bp)
 MIN_GTIN_LEN = 8
 MAX_GTIN_LEN = 14
 
+@app.before_serving
+async def startup():
+    """Run once before the server starts accepting requests."""
+    await init_pool()
+
+@app.after_serving
+async def shutdown():
+    """Run once when the server is shutting down."""
+    await close_pool()
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
 
 @app.route('/api/v1/product/<gtin>', methods=['GET'])
 async def get_product(gtin):
@@ -51,7 +63,7 @@ async def get_product(gtin):
     if not gtin.isdigit() or not (MIN_GTIN_LEN <= len(gtin) <= MAX_GTIN_LEN):
         return jsonify({"error": "Invalid barcode."}), 400
 
-    record = data_manager.get_product(gtin)
+    record = await data_manager.get_product(gtin)
 
     if not record:
         return jsonify({"status": "not_found", "gtin": gtin}), 404
@@ -76,7 +88,6 @@ async def get_product(gtin):
         'Connection':        'keep-alive',
     })
 
-
 @app.route('/api/v1/analyse/product', methods=['POST'])
 async def analyse_product_route():
     data = await request.get_json()
@@ -100,14 +111,13 @@ async def analyse_product_route():
 
     return jsonify({"status": "ok", "result": result}), 200
 
-
 @app.route('/api/v1/analyse/meal', methods=['POST'])
 async def analyse_meal_route():
     data = await request.get_json()
     if not data:
         return jsonify({"error": "Invalid payload."}), 400
 
-    image   = data.get('image', '')
+    image = data.get('image', '')
     profile = data.get('profile', {})
 
     if isinstance(image, str): image = image.strip()
@@ -124,7 +134,6 @@ async def analyse_meal_route():
         return jsonify({"error": "Analysis failed."}), 500
 
     return jsonify({"status": "ok", "result": result}), 200
-
 
 @app.route('/api/v1/analyse/menu', methods=['POST'])
 async def analyse_menu_route():
@@ -150,10 +159,76 @@ async def analyse_menu_route():
 
     return jsonify({"status": "ok", "result": result}), 200
 
+@app.route('/api/v1/chat/stream', methods=['POST'])
+async def chat_stream_route():
+    data = await request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid payload."}), 400
+
+    system_context = data.get('system_context', {})
+    history        = data.get('history', [])
+    message        = data.get('message', '')
+
+    if isinstance(message, str): 
+        message = message.strip()
+        
+    if not message:
+        logger.error("Missing message in chat stream request")
+        return jsonify({"error": "Missing message."}), 400
+
+    logger.info(f"Chat stream request received: {message[:30]}...")
+
+    async def generate():
+        # 1. Pipeline Stage 1: The Heavy Lift (Haiku)
+        text = await chat_assistant(system_context, history, message)
+        if not text:
+            yield _sse("error", {"message": "Analysis failed."})
+            return
+            
+        yield _sse("text", {"content": text})
+
+        # 2. Pipeline Stage 2: The UI Flourish (Flash-Lite)
+        emoji = await chat_emoji(text)
+        if emoji:
+            yield _sse("emoji", {"content": f" {emoji}"})
+            
+        yield _sse("done", {})
+
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control':     'no-cache',
+        'X-Accel-Buffering': 'no',
+        'Connection':        'keep-alive',
+    })
+
+@app.route('/api/v1/chat/emoji', methods=['POST'])
+async def chat_emoji_route():
+    """
+    Isolated testing endpoint for the tone-evaluation micro-inference task.
+    """
+    data = await request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid payload."}), 400
+
+    text = data.get('text', '')
+    if isinstance(text, str):
+        text = text.strip()
+
+    if not text:
+        return jsonify({"error": "Missing 'text' field to analyze."}), 400
+
+    # Hit the micro-inference function directly
+    emoji = await chat_emoji(text)
+
+    # Return the result (even if it's an empty string for safety)
+    return jsonify({
+        "status": "ok",
+        "emoji": emoji
+    }), 200
+
 if __name__ == '__main__':
-    import asyncio
     from hypercorn.config import Config
     from hypercorn.asyncio import serve
+    import asyncio
     config = Config()
     config.bind = ["127.0.0.1:5000"]
     asyncio.run(serve(app, config))
@@ -168,8 +243,8 @@ from __future__ import annotations
 #  core/analyser.py
 #
 
-from typing import Optional
 import json
+from typing import Optional
 
 from core.llm.router import router
 from core.llm.skills import SkillsLibrary
@@ -298,7 +373,89 @@ async def analyse_menu(text: str) -> Optional[dict]:
         print(f"  [!] analyse_menu failed: {e}")
         return None
 
+# ---------------------------------------------------------------------------
+# Chat Pipeline (Pipelined for SSE Streaming)
+# ---------------------------------------------------------------------------
 
+async def chat_assistant(system_context: dict, history: list, message: str) -> Optional[str]:
+    """Task 1: Generate the clinical response text."""
+    if not message:
+        return None
+
+    ctx_str = (
+        f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}\n"
+        f"Active Menu Context: {json.dumps(system_context.get('current_menu', []))}"
+    )
+
+    hist_str = ""
+    for msg in history:
+        role = "User" if msg.get("role") == "user" else "Trigzi"
+        hist_str += f"{role}: {msg.get('content', '')}\n"
+
+    prompt = SkillsLibrary.chat_assistant_prompt(
+        system_context=ctx_str,
+        history=hist_str,
+        message=message
+    )
+
+    # DYNAMIC CONFIG ROUTING
+    _cfg = llm_config.task_config("chat_assistant")
+
+    try:
+        response = await router.analyze(
+            payload       = {"prompt": prompt},
+            profile       = "", 
+            model_strings = _cfg["models"], 
+            optimize      = _cfg.get("optimize", "failover"),
+            timeout       = _cfg.get("timeout", 12),
+        )
+        
+        raw_text = str(response.get("result", "")).strip()
+        
+        if raw_text.lower().startswith("response:"):
+            raw_text = raw_text[9:]
+            
+        return raw_text.strip(" \n-")
+
+    except Exception as e:
+        print(f"  [!] chat_assistant failed: {e}")
+        return None
+
+
+async def chat_emoji(text: str) -> str:
+    """Task 2: Micro-inference to safely append an emoji."""
+    if not text:
+        return ""
+
+    prompt = SkillsLibrary.chat_emoji_prompt(text=text)
+
+    # DYNAMIC CONFIG ROUTING
+    _cfg = llm_config.task_config("chat_emoji")
+
+    try:
+        response = await router.analyze(
+            payload       = {"prompt": prompt},
+            profile       = "",
+            model_strings = _cfg["models"], 
+            optimize      = _cfg.get("optimize", "speed"), 
+            timeout       = _cfg.get("timeout", 3.0),
+        )
+
+        emoji_str = str(response.get("result", "")).strip()
+        
+        if not emoji_str or "none" in emoji_str.lower():
+            return ""
+            
+        return emoji_str[0] 
+
+    except Exception as e:
+        print(f"  [!] chat_emoji failed: {e}")
+        return ""
+
+
+============================
+#  core/data_manager.py
+============================
 ============================
 #  core/data_manager.py
 ============================
@@ -332,7 +489,7 @@ DEBUG_FORCE_UNENRICHED = os.environ.get("DEBUG_FORCE_UNENRICHED", "0") == "1"
 _off = OFFLookup()
 
 
-def get_product(scanned_gtin: str) -> Optional[dict]:
+async def get_product(scanned_gtin: str) -> Optional[dict]:
     if DEBUG_FORCE_NOT_FOUND:
         print(f"  [DEBUG] FORCE_NOT_FOUND: {scanned_gtin}")
         return None
@@ -341,7 +498,7 @@ def get_product(scanned_gtin: str) -> Optional[dict]:
     if not gtin:
         return None
 
-    record = _off.get(gtin)
+    record = await _off.get(gtin)
     if not record:
         return None
 
@@ -360,87 +517,85 @@ def is_enriched(record: dict) -> bool:
 ==================
 #  core/db.py
 ==================
+==================
+#  core/db.py
+==================
 from __future__ import annotations
 #
 #  core/db.py
 #
-#  MariaDB connection pool and enrichment registry for Trigzi.
+#  aiomysql connection pool and enrichment registry for Trigzi.
 #
 #  Usage:
-#      from core.db import get_conn, get_or_create_enrichment
+#      from core.db import get_pool
 #
-#      with get_conn() as conn:
-#          with conn.cursor() as cur:
-#              cur.execute("SELECT data FROM products WHERE gtin = %s", (gtin,))
-#              row = cur.fetchone()
-#
-#      enrichment_id = get_or_create_enrichment(
-#          task        = "product",
-#          llm_model   = "gemini-2.5-flash",
-#          prompt_ver  = "extract_v2",
-#          prompt_text = prompt_string,
-#      )
+#      pool = get_pool()
+#      async with pool.acquire() as conn:
+#          async with conn.cursor() as cur:
+#              await cur.execute("SELECT data FROM products WHERE gtin = %s", (gtin,))
+#              row = await cur.fetchone()
 #
 
 import os
 import hashlib
-import pymysql
-import pymysql.cursors
-from dbutils.pooled_db import PooledDB
+import asyncio
+import aiomysql
 from typing import Optional
 
 # --- Connection pool config ---
 
 _CONFIG = {
     "host":        os.environ.get("DB_HOST", "localhost"),
-    "db":          os.environ.get("DB_NAME", "trigzi"),
+    "port":        int(os.environ.get("DB_PORT", 3306)),
     "user":        os.environ.get("DB_USER", "trigzi"),
-    "passwd":      os.environ.get("DB_PASS", ""),
-    "charset":     "utf8mb4",
-    "cursorclass": pymysql.cursors.DictCursor,
+    "password":    os.environ.get("DB_PASS", ""),
+    "db":          os.environ.get("DB_NAME", "trigzi"),
     "autocommit":  True,
 }
 
-_pool: Optional[PooledDB] = None
+_pool: Optional[aiomysql.Pool] = None
 
-
-def _get_pool() -> PooledDB:
+async def init_pool():
+    """Initializes the async connection pool. Must be called within the Quart event loop."""
     global _pool
     if _pool is None:
-        _pool = PooledDB(
-            creator        = pymysql,
-            mincached      = 2,
-            maxcached      = 8,
-            maxconnections = 20,
-            blocking       = True,
-            **_CONFIG,
+        _pool = await aiomysql.create_pool(
+            minsize=2,
+            maxsize=8,
+            cursorclass=aiomysql.DictCursor,
+            **_CONFIG
         )
+        print("✅ aiomysql connection pool initialized.")
+
+async def close_pool():
+    """Gracefully shuts down the connection pool."""
+    global _pool
+    if _pool is not None:
+        _pool.close()
+        await _pool.wait_closed()
+        print("🛑 aiomysql connection pool closed.")
+
+def get_pool() -> aiomysql.Pool:
+    """Returns the active pool. Raises if not initialized."""
+    if _pool is None:
+        raise RuntimeError("Database pool not initialized. Did you forget to await init_pool()?")
     return _pool
 
-
-def get_conn() -> pymysql.connections.Connection:
-    """
-    Return a pooled connection.
-    Use as a context manager — connection is returned to pool on exit.
-    """
-    return _get_pool().connection()
-
-
-def ping() -> bool:
+async def ping() -> bool:
     """Quick connectivity check. Returns True if DB is reachable."""
     try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
         return True
     except Exception as e:
         print(f"  [!] DB ping failed: {e}")
         return False
 
-
 # --- Enrichment registry ---
 
-def get_or_create_enrichment(
+async def get_or_create_enrichment(
     task:        str,
     llm_model:   str,
     prompt_ver:  str,
@@ -448,36 +603,24 @@ def get_or_create_enrichment(
 ) -> Optional[int]:
     """
     Look up or insert an enrichment row identified by (prompt_hash, llm_model).
-
-    The composite unique key ensures that the same prompt through a different
-    model gets its own row — prompt×model is the meaningful unit of enrichment
-    quality, not prompt alone.
-
-    Returns the enrichment id, or None on error.
-
-    Re-enrichment query pattern:
-        SELECT gtin FROM products
-        WHERE enrichment_id IN (
-            SELECT id FROM enrichments
-            WHERE prompt_ver != 'extract_v3'
-            OR llm_model NOT IN ('gemini-2.5-flash')
-        )
     """
     h = hashlib.sha256(prompt_text.encode()).hexdigest()[:8]
+    
     try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
                     INSERT IGNORE INTO enrichments
                         (task, llm_model, prompt_ver, prompt_hash, prompt_text)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (task, llm_model, prompt_ver, h, prompt_text))
 
-                cur.execute(
+                await cur.execute(
                     "SELECT id FROM enrichments WHERE prompt_hash = %s AND llm_model = %s",
                     (h, llm_model)
                 )
-                row = cur.fetchone()
+                row = await cur.fetchone()
                 return row["id"] if row else None
     except Exception as e:
         print(f"  [!] get_or_create_enrichment error: {e}")
@@ -547,7 +690,6 @@ def _queue_for_validation(record: dict) -> None:
     except Exception as e:
         print(f"  [!] validate queue write failed: {e}")
 
-
 async def enrich(record: dict) -> dict:
     """
     Enrich a raw product record with a clinical profile.
@@ -579,6 +721,7 @@ async def enrich(record: dict) -> dict:
                 optimize      = _cfg["optimize"],
                 timeout       = _cfg["timeout"],
             )
+        
             profile_data = response.get("result")
             llm_model    = response.get("model", "router")
         except Exception as e:
@@ -589,7 +732,7 @@ async def enrich(record: dict) -> dict:
         enriched["clinical_profile"] = profile_data
         enriched["_enrichment_llm"]  = llm_model
 
-        enrichment_id = get_or_create_enrichment(
+        enrichment_id = await get_or_create_enrichment(
             task        = "product",
             llm_model   = llm_model,
             prompt_ver  = PROMPT_VER,
@@ -597,10 +740,10 @@ async def enrich(record: dict) -> dict:
         )
 
         _queue_for_validation(enriched)
-        _off.save(enriched, enrichment_id=enrichment_id)
+        await _off.save(enriched, enrichment_id=enrichment_id)
     else:
         enriched["_enrichment_llm"] = "FAILED"
-        _off.save(enriched, enrichment_id=None)
+        await _off.save(enriched, enrichment_id=None)
 
     return enriched
 
@@ -1819,6 +1962,20 @@ class SkillsLibrary:
         template = SkillsLibrary._load_prompt('analyse_menu.txt')
         return template.format(menu_text=ocr_text)
 
+    @staticmethod
+    def chat_assistant_prompt(system_context: str, history: str, message: str) -> str:
+        template = SkillsLibrary._load_prompt('chat_assistant.txt')
+        return template.format(
+            system_context=system_context,
+            history=history,
+            message=message
+        )
+  
+    @staticmethod
+    def chat_emoji_prompt(text: str) -> str:
+        template = SkillsLibrary._load_prompt('chat_emoji.txt')
+        return template.format(text=text)
+
 
 =============================
 #  core/llm/validator.py
@@ -2960,16 +3117,19 @@ import sys
 import time
 from pathlib import Path
 import uuid
-from core.llm.router import Router # (Adjust 'Router' if your class is named differently, e.g., LLMRouter)
 
-# Instantiate your router (if it requires config injection, pass it here)
-llm_router = Router()
+# 1. Bootstrap the Python path BEFORE importing local modules.
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+
+from core.llm.router import LLMRouter 
+from core.llm.skills import SkillsLibrary
+
+llm_router = LLMRouter()
 
 # --- Configuration & Paths ---
-BASE_DIR = Path(__file__).resolve().parent.parent
 PROVIDERS_FILE = BASE_DIR / "core" / "llm" / "llm_providers.json"
-# Assuming fixtures are in a tests/fixtures or similar directory
-FIXTURES_DIR = BASE_DIR / "tests" / "fixtures" 
+FIXTURES_DIR = BASE_DIR / "tests" / "fixtures"
 
 def load_providers():
     if not PROVIDERS_FILE.exists():
@@ -2977,61 +3137,59 @@ def load_providers():
         sys.exit(1)
     with open(PROVIDERS_FILE, 'r') as f:
         providers = json.load(f)
-    print(f"✅ LLMProviderConfig: loaded {len(providers)} providers from {PROVIDERS_FILE}")
+    print(f"✅ LLMProviderConfig: loaded {len(providers)} providers from {PROVIDERS_FILE.name}")
     return providers
 
 def get_task_payload_and_prompt(task, content):
     """
     Router for building the strict API payload based on the task name.
-    Keeps the execution logic completely decoupled from prompt engineering.
     """
-    if task == "enrich_product":
+    if task == "chat_assistant":
+        data = json.loads(content)
+        ctx_str = (
+            f"Dietary Profile: {json.dumps(data.get('system_context', {}).get('dietary_profile', {}))}\n"
+            f"Active Menu Context: {json.dumps(data.get('system_context', {}).get('current_menu', []))}"
+        )
+        hist_str = ""
+        for msg in data.get("history", []):
+            role = "User" if msg.get("role") == "user" else "Trigzi"
+            hist_str += f"{role}: {msg.get('content', '')}\n"
+
+        prompt = SkillsLibrary.chat_assistant_prompt(
+            system_context=ctx_str,
+            history=hist_str,
+            message=data.get("message", "")
+        )
+        return {"prompt": prompt}, prompt
+
+    elif task == "chat_emoji":
+        # For the emoji micro-inference, the fixture is just the raw text string to analyze
+        prompt = SkillsLibrary.chat_emoji_prompt(text=content.strip())
+        return {"prompt": prompt}, prompt
+
+    elif task == "enrich_product":
         system_prompt = (
             "You are a strictly clinical dietary analysis engine. "
             "Analyze the provided product JSON for hidden allergens and dietary risks. "
-            "You must strictly identify hidden FODMAPs (e.g., Fructans in garlic/onion, Mannitol in mushrooms) "
-            "and call out any deceptive E-numbers. "
             "Output your analysis strictly in flat JSON format."
         )
-        
         user_prompt = f"[PRODUCT DATA]\n{content}\n\n[OUTPUT FORMAT]\nReturn strictly JSON."
-        
-        payload = {
-            "temperature": 0.1, # Rock solid determinism for clinical data
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-        }
-        return payload, user_prompt
+        return {"prompt": f"{system_prompt}\n\n{user_prompt}"}, user_prompt
 
-    # Add new tasks (like 'generate_snark') here later
     raise ValueError(f"Payload builder not implemented for task: '{task}'")
 
 async def execute_llm_request(model_name, payload):
-    """
-    Executes a strict, 1:1 API call via the core router.
-    Bypasses standard routing logic (failovers/races) to ensure clean benchmark data.
-    """
+    """Executes a strict, 1:1 API call via the core router."""
     session_id = f"bench-{uuid.uuid4().hex[:8]}"
-    
     try:
-        # Hitting the internal method to guarantee a direct API strike
         result = await llm_router._execute_direct(
             payload=payload,
-            profile="benchmark", # Adjust if your router expects a specific string here
+            profile="benchmark", 
             model_str=model_name,
             session_id=session_id,
             timeout=45.0
         )
-        
-        # Your router returns a Dict[str, Any]. 
-        # Depending on how your router normalizes responses, extract the text here.
-        # It's likely something like result.get('content') or result['choices'][0]['message']['content']
-        
-        # For now, let's pretty-print the raw dictionary so you can see exactly what comes back:
         return json.dumps(result, indent=2)
-        
     except Exception as e:
         return f"❌ Router Exception: {str(e)}"
 
@@ -3043,7 +3201,6 @@ async def evaluate_model(model_name, task, content):
         print(f"📡 Sending request to {model_name}...")
         
         response = await execute_llm_request(model_name, payload)
-        
         elapsed = time.time() - start_time
         return {
             "model": model_name,
@@ -3062,36 +3219,53 @@ async def evaluate_model(model_name, task, content):
 
 async def main():
     parser = argparse.ArgumentParser(description="Run LLM benchmarking tasks.")
-    parser.add_argument("task", help="The specific benchmark task to run (e.g., enrich_product)")
-    parser.add_argument("-v", "--verbosity", type=int, default=1, help="Output verbosity level")
+    parser.add_argument("task", help="Task name mapping to llm_providers.json (e.g., chat_assistant, chat_emoji)")
+    parser.add_argument("-f", "--fixture", help="Explicit path to a JSON/text fixture file")
+    parser.add_argument("-m", "--models", help="Comma-separated list of models to test (overrides config)")
     args = parser.parse_args()
 
     providers = load_providers()
-    target_models = ["gpt-4o", "claude-sonnet-4-6"] # Or extract dynamically from providers
-    
-    print(f"🚀 Initializing Benchmark Pipeline for task: {args.task}")
-    print(f"📡 Target Models: {', '.join(target_models)}")
-    
-    # Locate the fixture
-    # Adjust this filename/path to exactly match where your truffle_sauce.json lives
-    fixture_path = FIXTURES_DIR / "truffle_sauce.json" 
-    if not fixture_path.exists():
-        # Fallback if I guessed your directory structure wrong
-        fixture_path = BASE_DIR / "truffle_sauce.json"
-        if not fixture_path.exists():
-            print(f"❌ Error: Could not find fixture data for task.")
+
+    # Determine Target Models
+    if args.models:
+        target_models = [m.strip() for m in args.models.split(",")]
+        print("⚠️  Overriding config with CLI model selection.")
+    else:
+        routing_config = providers.get("routing", {}).get(args.task, {})
+        target_models = routing_config.get("models", [])
+        if not target_models:
+            print(f"❌ CRITICAL ERROR: No 'models' array found for task '{args.task}' in llm_providers.json.")
             sys.exit(1)
 
-    print(f"📁 Found fixture at {fixture_path.name}. Beginning evaluation...\n")
-    
-    with open(fixture_path, 'r') as f:
-        content = f.read()
+    print(f"🚀 Initializing Benchmark Pipeline for task: {args.task}")
+    print(f"📡 Target Models: {', '.join(target_models)}")
 
-    # Fan out to all models concurrently
+    # Determine Fixture Path
+    if args.fixture:
+        fixture_path = Path(args.fixture)
+    else:
+        # Default convention: tests/fixtures/<task_name>_eval.json
+        fixture_path = FIXTURES_DIR / f"{args.task}_eval.json"
+        
+        # Fallback for older naming conventions (like truffle_sauce) if needed
+        if not fixture_path.exists() and args.task == "enrich_product":
+            fixture_path = FIXTURES_DIR / "truffle_sauce.json"
+
+    if not fixture_path.exists():
+        print(f"❌ CRITICAL ERROR: Fixture file not found at {fixture_path}")
+        print(f"Pass a specific file using the -f flag: ./benchmark_task.py {args.task} -f path/to/file.json")
+        sys.exit(1)
+
+    print(f"📁 Loaded fixture: {fixture_path.name}\n")
+
+    with open(fixture_path, 'r', encoding='utf-8') as file:
+        content = file.read()
+
+    # Fan out concurrently
     tasks = [evaluate_model(model, args.task, content) for model in target_models]
     results = await asyncio.gather(*tasks)
 
-    # Output Results
+    # Output
     print("-" * 50)
     print("🏆 BENCHMARK RESULTS")
     print("-" * 50)
@@ -3103,7 +3277,6 @@ async def main():
             print(f"🔴 {model} ({res['time']}s) FAILED:\n{res['error']}\n")
 
 if __name__ == "__main__":
-    # Prevent "Event loop is closed" errors on Windows/certain environments
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
@@ -6958,6 +7131,9 @@ def parse_coles(raw: Union[str, dict, None]) -> Tuple[dict, dict, Optional[float
 ===========================
 #  utils/off_lookup.py
 ===========================
+============================
+#  utils/off_lookup.py
+============================
 #!/usr/bin/env python3
 from __future__ import annotations
 #
@@ -6968,11 +7144,8 @@ from __future__ import annotations
 #  Usage:
 #      from utils.off_lookup import OFFLookup
 #      lookup = OFFLookup()
-#      record = lookup.get("9352042000342")   # dict or None
-#      lookup.save(record, enrichment_id=42)
-#
-#  CLI:
-#      ./utils/off_lookup.py 9352042000342
+#      record = await lookup.get("9352042000342")   # dict or None
+#      await lookup.save(record, enrichment_id=42)
 #
 
 import json
@@ -6982,7 +7155,7 @@ import os
 from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from core.db import get_conn
+from core.db import get_pool
 from utils.gtin import normalise
 
 
@@ -6990,19 +7163,21 @@ class OFFLookup:
 
     # MARK: - Read
 
-    def get(self, gtin: str) -> Optional[dict]:
+    async def get(self, gtin: str) -> Optional[dict]:
         """Return the product record for a GTIN, or None if not found."""
         gtin = normalise(gtin)
         if not gtin:
             return None
         try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
                         "SELECT data FROM products WHERE gtin = %s",
                         (gtin,)
                     )
-                    row = cur.fetchone()
+                    row = await cur.fetchone()
+            
             if not row:
                 return None
             data = row["data"]
@@ -7011,57 +7186,55 @@ class OFFLookup:
             print(f"  [!] off_lookup.get error: {e}")
             return None
 
-    def exists(self, gtin: str) -> bool:
+    async def exists(self, gtin: str) -> bool:
         """Return True if a record exists for this GTIN."""
         gtin = normalise(gtin)
         if not gtin:
             return False
         try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
                         "SELECT 1 FROM products WHERE gtin = %s",
                         (gtin,)
                     )
-                    return cur.fetchone() is not None
+                    return await cur.fetchone() is not None
         except Exception:
             return False
 
-    def is_enriched(self, gtin: str) -> bool:
+    async def is_enriched(self, gtin: str) -> bool:
         """Return True if the record has an enrichment_id set."""
         gtin = normalise(gtin)
         if not gtin:
             return False
         try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
                         "SELECT enrichment_id FROM products WHERE gtin = %s",
                         (gtin,)
                     )
-                    row = cur.fetchone()
+                    row = await cur.fetchone()
             return bool(row and row["enrichment_id"])
         except Exception:
             return False
 
     # MARK: - Write
 
-    def save(self, record: dict, enrichment_id: Optional[int] = None) -> bool:
+    async def save(self, record: dict, enrichment_id: Optional[int] = None) -> bool:
         """
         Upsert a product record.
-
-        enrichment_id — FK to enrichments table. Pass None for unenriched records.
-        When updating an existing record, enrichment_id is only written if
-        the new value is not None (prevents overwriting a valid enrichment
-        with None on a partial update).
         """
         gtin = normalise(record.get("gtin", ""))
         if not gtin:
             return False
         try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("""
                         INSERT INTO products (gtin, source, name, enrichment_id, data)
                         VALUES (%s, %s, %s, %s, %s)
                         ON DUPLICATE KEY UPDATE
@@ -7088,15 +7261,21 @@ class OFFLookup:
 # Module-level singleton
 lookup = OFFLookup()
 
-
 if __name__ == "__main__":
+    import asyncio
     parser = argparse.ArgumentParser(description="Look up a GTIN in the products DB.")
     parser.add_argument("gtin", help="GTIN to look up")
     args = parser.parse_args()
 
-    record = lookup.get(args.gtin)
-    if record:
-        print(json.dumps(record, indent=2, ensure_ascii=False))
-    else:
-        print(f"Not found: {args.gtin}")
+    async def main():
+        from core.db import init_pool, close_pool
+        await init_pool()
+        record = await lookup.get(args.gtin)
+        if record:
+            print(json.dumps(record, indent=2, ensure_ascii=False))
+        else:
+            print(f"Not found: {args.gtin}")
+        await close_pool()
+
+    asyncio.run(main())
 

@@ -105,7 +105,7 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
     async def test_saves_to_db_with_enrichment_id(self):
         from core.enricher import enrich
 
-        save_mock = MagicMock()
+        save_mock = AsyncMock()
         with patch("core.enricher.router.analyze", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
              patch("core.enricher.get_or_create_enrichment", return_value=42), \
              patch("core.enricher.log_scan"), \
@@ -133,7 +133,7 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
     async def test_router_failure_sets_failed_status(self):
         from core.enricher import enrich
 
-        save_mock = MagicMock()
+        save_mock = AsyncMock()
         with patch("core.enricher.router.analyze", AsyncMock(side_effect=Exception("LLM down"))), \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation"), \

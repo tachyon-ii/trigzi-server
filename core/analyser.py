@@ -5,12 +5,15 @@ from __future__ import annotations
 #
 
 import json
+import logging
 from typing import Optional
 
 from core.llm.router import router
 from core.llm.skills import SkillsLibrary
 from core.llm.config import config as llm_config
 
+# Initialize the logger for this module
+logger = logging.getLogger(__name__)
 
 async def analyse_product(
     gtin:           str,
@@ -39,10 +42,10 @@ async def analyse_product(
         return json.loads(raw_result)
 
     except json.JSONDecodeError as e:
-        print(f"  [!] analyse_product JSON decode failed: {e}")
+        logger.error(f" analyse_product JSON decode failed: {e}")
         return None
     except Exception as e:
-        print(f"  [!] analyse_product failed: {e}")
+        logger.error(f" analyse_product failed: {e}")
         return None
 
 
@@ -68,10 +71,10 @@ async def analyse_meal(image: str, profile: str) -> Optional[dict]:
         return json.loads(raw_result)
 
     except json.JSONDecodeError as e:
-        print(f"  [!] analyse_meal JSON decode failed: {e}")
+        logger.error(f" analyse_meal JSON decode failed: {e}")
         return None
     except Exception as e:
-        print(f"  [!] analyse_meal failed: {e}")
+        logger.error(f" analyse_meal failed: {e}")
         return None
 
 
@@ -131,7 +134,7 @@ async def analyse_menu(text: str) -> Optional[dict]:
         return {"type": "menu", "items": dishes}
 
     except Exception as e:
-        print(f"  [!] analyse_menu failed: {e}")
+        logger.error(f" analyse_menu failed: {e}")
         return None
 
 # ---------------------------------------------------------------------------
@@ -179,7 +182,7 @@ async def chat_assistant(system_context: dict, history: list, message: str) -> O
         return raw_text.strip(" \n-")
 
     except Exception as e:
-        print(f"  [!] chat_assistant failed: {e}")
+        logger.error(f" chat_assistant failed: {e}")
         return None
 
 
@@ -210,5 +213,56 @@ async def chat_emoji(text: str) -> str:
         return emoji_str[0] 
 
     except Exception as e:
-        print(f"  [!] chat_emoji failed: {e}")
+        logger.error(f" chat_emoji failed: {e}")
         return ""
+
+async def onboarding_assistant(message: str, fallback_name: str) -> tuple[list[dict], str]:
+    """Task: Execute scripted onboarding. Returns (events, text_to_emojify)."""
+    if not message:
+        return [{"event": "error", "data": {"message": "Empty message."}}], ""
+
+    prompt = SkillsLibrary.onboarding_prompt(message, fallback_name)
+    _cfg = llm_config.task_config("chat_assistant")
+
+    try:
+        response = await router.analyze(
+            payload       = {"prompt": prompt},
+            profile       = "", 
+            model_strings = _cfg["models"], 
+            optimize      = _cfg.get("optimize", "failover"),
+            timeout       = _cfg.get("timeout", 12),
+        )
+        
+        raw_text = str(response.get("result", "")).strip()
+        if raw_text.lower().startswith("response:"):
+            raw_text = raw_text[9:]
+        raw_text = raw_text.strip(" \n-")
+
+        events = []
+        text_content = ""
+
+        for line in raw_text.split('\n'):
+            line = line.strip()
+            if not line or line == "---": continue
+
+            if line.startswith("Message:"):
+                text_content = line[8:].strip()
+                events.append({"event": "text", "data": {"content": text_content}})
+
+            elif line.startswith("Fact:"):
+                k, v = line[5:].split("=", 1)
+                events.append({"event": "fact", "data": {"key": k.strip(), "value": v.strip()}})
+
+            elif line.startswith("Action:"):
+                action_data = line[7:].strip()
+                if "|" in action_data:
+                    tool, param = action_data.split("|", 1)
+                    events.append({"event": "action", "data": {"tool": tool.strip(), "param": param.strip()}})
+                else:
+                    events.append({"event": "action", "data": {"tool": action_data.strip(), "param": ""}})
+
+        return events, text_content
+
+    except Exception as e:
+        logger.error(f" onboarding_assistant failed: {e}")
+        return [{"event": "error", "data": {"message": "Analysis failed."}}], ""

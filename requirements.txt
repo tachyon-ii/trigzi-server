@@ -1,7 +1,19 @@
-# Trigzi app requirements
-Flask
-curl_cffi
-requests
-gunicorn
-aiohttp
-pytest-asyncio
+# --- Web Framework & ASGI Server ---
+quart>=0.19.0
+hypercorn>=0.16.0
+
+# --- Async Networking (LLM Probes & API Calls) ---
+aiohttp>=3.9.0
+
+# --- Database (Current Sync & Target Async) ---
+pymysql>=1.1.0
+dbutils>=3.0.0
+aiomysql>=0.2.0
+cryptography>=42.0.0  # Required for modern MariaDB/MySQL auth (caching_sha2_password)
+
+# --- Scrapers & Fallbacks ---
+curl-cffi>=0.6.0      # TLS impersonation for Woolworths/BarcodeLookup
+
+# --- Testing & Utilities ---
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

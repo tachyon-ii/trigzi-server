@@ -28,7 +28,7 @@ DEBUG_FORCE_UNENRICHED = os.environ.get("DEBUG_FORCE_UNENRICHED", "0") == "1"
 _off = OFFLookup()
 
 
-def get_product(scanned_gtin: str) -> Optional[dict]:
+async def get_product(scanned_gtin: str) -> Optional[dict]:
     if DEBUG_FORCE_NOT_FOUND:
         print(f"  [DEBUG] FORCE_NOT_FOUND: {scanned_gtin}")
         return None
@@ -37,7 +37,7 @@ def get_product(scanned_gtin: str) -> Optional[dict]:
     if not gtin:
         return None
 
-    record = _off.get(gtin)
+    record = await _off.get(gtin)
     if not record:
         return None
 
