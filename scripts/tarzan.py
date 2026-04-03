@@ -47,6 +47,8 @@ def excluded_dir(name: str) -> bool:
 def excluded_file(name: str) -> bool:
     if name.endswith(".py"):
         return name in EXCLUDE_FILES
+    if name.endswith(".md"):
+        return name in EXCLUDE_FILES
     else:
         return name
 

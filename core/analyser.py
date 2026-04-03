@@ -146,6 +146,19 @@ async def chat_assistant(system_context: dict, history: list, message: str) -> O
     if not message:
         return None
 
+    # THE FIX: Defensive type coercion to prevent 500 Server Errors
+    if isinstance(system_context, str):
+        try:
+            # Try to parse it if it happens to be a JSON string
+            system_context = json.loads(system_context)
+        except Exception:
+            # Fallback: wrap the raw string in the expected key
+            system_context = {"dietary_profile": system_context}
+            
+    elif not isinstance(system_context, dict):
+        # Fallback for None or other unexpected types
+        system_context = {}
+
     ctx_str = (
         f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}\n"
         f"Active Menu Context: {json.dumps(system_context.get('current_menu', []))}"
@@ -184,7 +197,6 @@ async def chat_assistant(system_context: dict, history: list, message: str) -> O
     except Exception as e:
         logger.error(f" chat_assistant failed: {e}")
         return None
-
 
 async def chat_emoji(text: str) -> str:
     """Task 2: Micro-inference to safely append an emoji."""

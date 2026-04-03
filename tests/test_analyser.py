@@ -205,6 +205,51 @@ class TestAnalyseMenu(unittest.IsolatedAsyncioTestCase):
         models = mock.call_args.kwargs["model_strings"]
         self.assertEqual(list(models), ["m1", "m2"])
 
+# ---------------------------------------------------------------------------
+# chat_assistant
+# ---------------------------------------------------------------------------
+
+class TestChatAssistant(unittest.IsolatedAsyncioTestCase):
+
+    async def test_string_system_context_handled_gracefully(self):
+        """Verify that passing a string for system_context doesn't crash the parser."""
+        from core.analyser import chat_assistant
+        
+        mock_router_response = {
+            "result": "Response: Hello James!",
+            "model": "gemini-2.5-flash",
+            "provider": "Gemini"
+        }
+        
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.return_value = mock_router_response
+            
+            # THE SMOKING GUN: Passing a raw string instead of a dict
+            malformed_context = "[ENVIRONMENTAL FACTS]\nuser_localtime: Australia/Sydney\n"
+            
+            # Without the fix, this will throw: AttributeError: 'str' object has no attribute 'get'
+            result = await chat_assistant(
+                system_context=malformed_context, 
+                history=[], 
+                message="My name is James!"
+            )
+            
+            # With the fix, it should gracefully wrap the string and return the payload
+            self.assertEqual(result, "Hello James!")
+            
+            # Verify the string was wrapped in a dictionary correctly before hitting the prompt builder
+            payload = mock.call_args.kwargs["payload"]
+            self.assertIn("Australia/Sydney", payload["prompt"])
+
+    async def test_returns_error_on_router_exception(self):
+        """Verify the parser degrades gracefully if the LLM fails."""
+        from core.analyser import chat_assistant
+        
+        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+            mock.side_effect = Exception("LLM Timeout")
+            result = await chat_assistant({"dietary_profile": "Vegan"}, [], "Hello")
+            
+        self.assertIsNone(result)
 
 # ---------------------------------------------------------------------------
 # onboarding_assistant

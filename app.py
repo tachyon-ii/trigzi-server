@@ -62,15 +62,21 @@ async def get_product(gtin):
         return jsonify({"status": "complete", "product": record}), 200
 
     async def generate():
-        name  = record.get("name",  "this product")
-        brand = record.get("brand", "")
-        label = f"{name} by {brand}" if brand else name
-        yield _sse("progress", {"message": f"Found {label}"})
- 
-        yield _sse("progress", {"message": "Running latest analytics\u2026"})
- 
-        enriched = await enrich(record)
-        yield _sse("enriched", {"status": "complete", "product": enriched})
+        try:
+            name  = record.get("name",  "this product")
+            brand = record.get("brand", "")
+            label = f"{name} by {brand}" if brand else name
+            yield _sse("progress", {"message": f"Found {label}"})
+     
+            yield _sse("progress", {"message": "Running latest analytics\u2026"})
+     
+            enriched = await enrich(record)
+            yield _sse("enriched", {"status": "complete", "product": enriched})
+            
+        except Exception as e:
+            # THE FIX: Catch enrichment crashes and cleanly close the iOS scanner
+            logger.error(f"Product enrichment stream crashed: {str(e)}", exc_info=True)
+            yield _sse("error", {"message": "Analytics failed. Please try scanning again."})
 
     return Response(generate(), mimetype='text/event-stream', headers={
         'Cache-Control':     'no-cache',
@@ -169,20 +175,26 @@ async def chat_stream_route():
     logger.info(f"Chat stream request received: {message[:30]}...")
 
     async def generate():
-        # 1. Pipeline Stage 1: The Heavy Lift (Haiku)
-        text = await chat_assistant(system_context, history, message)
-        if not text:
-            yield _sse("error", {"message": "Analysis failed."})
-            return
-            
-        yield _sse("text", {"content": text})
+        try:
+            # 1. Pipeline Stage 1: The Heavy Lift (Haiku)
+            text = await chat_assistant(system_context, history, message)
+            if not text:
+                yield _sse("error", {"message": "Analysis failed."})
+                return
+         
+            yield _sse("text", {"content": text})
 
-        # 2. Pipeline Stage 2: The UI Flourish (Flash-Lite)
-        emoji = await chat_emoji(text)
-        if emoji:
-            yield _sse("emoji", {"content": f" {emoji}"})
+            # 2. Pipeline Stage 2: The UI Flourish (Flash-Lite)
+            emoji = await chat_emoji(text)
+            if emoji:
+                yield _sse("emoji", {"content": f" {emoji}"})
+                
+            yield _sse("done", {})
             
-        yield _sse("done", {})
+        except Exception as e:
+            # Catch chat stream crashes and cleanly close the iOS chat bubble
+            logger.error(f"Stream crashed: {str(e)}", exc_info=True)
+            yield _sse("error", {"message": "An unexpected server error occurred."})
 
     return Response(generate(), mimetype='text/event-stream', headers={
         'Cache-Control':     'no-cache',

@@ -258,6 +258,35 @@ GEMINI_API_KEY=...
 
 ---
 
+### API Keys & Environment Architecture (The Dual-State Trap)
+
+Trigzi centralizes all secrets and configuration (including database credentials and LLM API keys) in a single file: `/etc/trigzi/env`. 
+
+Because this file uses standard bash `export VAR="value"` syntax so it can be easily sourced by developers, it cannot be read natively by systemd's default `EnvironmentFile` directive (which strictly requires `VAR="value"` without the `export` keyword). 
+
+To solve this, Trigzi uses a dual-consumption architecture:
+
+**1. Command Line / Scripts (Interactive)**
+When running maintenance scripts (e.g., `./scripts/probe_live.py`), the keys must be loaded into your active shell session. This is handled by the custom `trigzi()` alias in `/root/.bashrc`. Running the `trigzi` command uses `set -a` to export the variables, sources `/etc/trigzi/env`, and activates the Python virtual environment. 
+
+**2. The Live Application (Systemd)**
+The live Quart application loads its environment variables via a systemd drop-in override file located at: `/etc/systemd/system/trigzi_api.service.d/override.conf`. 
+
+⚠️ **APPLYING ENVIRONMENT CHANGES** ⚠️
+If you update an API key or database credential in `/etc/trigzi/env`, the live application will not see it until the master process dumps its memory. You must run `./deploy.sh`, which performs a hard `systemctl restart trigzi_api` to cycle the master process and inject the fresh keys.
+
+***
+
+That perfectly documents the architecture without the false graceful-reload narrative. 
+
+With the documentation patched and the backend endpoints fully bulletproofed, we are ready for **Track B**. 
+
+To give Trigzi its clinical teeth, how do you want to handle the Semantic RAG lookup when the user asks about an ingredient?
+1. **Client-Side Injection:** The iOS app intercepts the text, queries `unified_index.json`, and injects the facts into `system_context` before hitting the network.
+2. **Server-Side RAG:** We push the clinical dictionary to MariaDB/Python, and `core/analyser.py` queries the database to build the prompt.
+
+---
+
 ## iOS App
 
 The iOS companion app (`scanner`) is a SwiftUI application handling:
