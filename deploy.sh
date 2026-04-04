@@ -20,6 +20,10 @@ fi
 
 echo "OK: Environment $DB_USER@$DB_NAME"
 echo "OK: Virtual environment $VIRTUAL_ENV"
+
+echo "Fixing permissions..."
+chown -R nginx: .
+
 echo "Bouncing Trigzi services..."
 
 # first daemon-reload
@@ -32,4 +36,4 @@ sudo systemctl restart trigzi_api
 sudo systemctl reload nginx
 
 echo "Done."
-sudo systemctl status trigzi_api --no-pager | grep Active
+sudo systemctl status trigzi_api --no-pager

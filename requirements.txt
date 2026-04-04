@@ -17,3 +17,4 @@ curl-cffi>=0.6.0      # TLS impersonation for Woolworths/BarcodeLookup
 # --- Testing & Utilities ---
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+jsonschema>=4.25

@@ -4,6 +4,7 @@ from __future__ import annotations
 #  core/analyser.py
 #
 
+import re
 import json
 import logging
 from typing import Optional
@@ -141,23 +142,29 @@ async def analyse_menu(text: str) -> Optional[dict]:
 # Chat Pipeline (Pipelined for SSE Streaming)
 # ---------------------------------------------------------------------------
 
-async def chat_assistant(system_context: dict, history: list, message: str) -> Optional[str]:
-    """Task 1: Generate the clinical response text."""
+async def chat_assistant(system_context: dict, history: list, message: str, trigzi_nickname: str = "Trigzi") -> tuple[Optional[str], Optional[str]]:
+    """Task 1: Generate the clinical response text and intercept UI actions. Returns (text, action)"""
     if not message:
-        return None
+        return None, None
 
-    # THE FIX: Defensive type coercion to prevent 500 Server Errors
+    # Defensive type coercion
     if isinstance(system_context, str):
         try:
-            # Try to parse it if it happens to be a JSON string
             system_context = json.loads(system_context)
         except Exception:
-            # Fallback: wrap the raw string in the expected key
             system_context = {"dietary_profile": system_context}
-            
     elif not isinstance(system_context, dict):
-        # Fallback for None or other unexpected types
         system_context = {}
+
+    # 🎛️ THE FIX: Map the Attitude Integer to a strict LLM Persona
+    attitude_level = system_context.get('attitude_level', 1)
+    
+    if attitude_level == 0:
+        persona_instruction = "A clinical, highly professional, and empathetic dietary assistant. Provide strictly factual, objective advice. ZERO sass, zero sarcasm, and zero jokes. Prioritize clarity and safety."
+    elif attitude_level == 2:
+        persona_instruction = "A sassy, highly observant, and unfiltered dietary assistant. Playfully roast the user, be witty, and deliver your accurate dietary advice with maximum sass and humor."
+    else:
+        persona_instruction = "A friendly, conversational, and slightly sassy dietary assistant. Balance helpful, accurate dietary advice with a warm, witty tone."
 
     ctx_str = (
         f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}\n"
@@ -169,10 +176,13 @@ async def chat_assistant(system_context: dict, history: list, message: str) -> O
         role = "User" if msg.get("role") == "user" else "Trigzi"
         hist_str += f"{role}: {msg.get('content', '')}\n"
 
+    # INJECT into prompt builder:
     prompt = SkillsLibrary.chat_assistant_prompt(
         system_context=ctx_str,
         history=hist_str,
-        message=message
+        message=message,
+        trigzi_nickname=trigzi_nickname,
+        persona_instruction=persona_instruction # <-- PASS TO TEMPLATE
     )
 
     # DYNAMIC CONFIG ROUTING
@@ -191,12 +201,24 @@ async def chat_assistant(system_context: dict, history: list, message: str) -> O
         
         if raw_text.lower().startswith("response:"):
             raw_text = raw_text[9:]
-            
-        return raw_text.strip(" \n-")
+        raw_text = raw_text.strip(" \n-")
+
+        # =================================================================
+        # THE ACTION INTERCEPTOR (UI OVERRIDES)
+        # =================================================================
+        action_command = None
+        action_match = re.search(r'\[ACTION:\s*([^\]]+)\]', raw_text)
+        
+        if action_match:
+            action_command = action_match.group(1).strip()
+            # Strip the tag from the text so the user never sees it
+            raw_text = re.sub(r'\[ACTION:\s*[^\]]+\]', '', raw_text).strip()
+
+        return raw_text, action_command
 
     except Exception as e:
-        logger.error(f" chat_assistant failed: {e}")
-        return None
+        logger.error(f" chat_assistant failed: {e}", exc_info=True)
+        return None, None
 
 async def chat_emoji(text: str) -> str:
     """Task 2: Micro-inference to safely append an emoji."""
@@ -228,12 +250,14 @@ async def chat_emoji(text: str) -> str:
         logger.error(f" chat_emoji failed: {e}")
         return ""
 
-async def onboarding_assistant(message: str, fallback_name: str) -> tuple[list[dict], str]:
+async def onboarding_assistant(message: str, fallback_name: str, trigzi_nickname: str = "Trigzi") -> tuple[list[dict], str]:
     """Task: Execute scripted onboarding. Returns (events, text_to_emojify)."""
     if not message:
         return [{"event": "error", "data": {"message": "Empty message."}}], ""
 
-    prompt = SkillsLibrary.onboarding_prompt(message, fallback_name)
+    # INJECT into prompt builder:
+    prompt = SkillsLibrary.onboarding_prompt(message, fallback_name, trigzi_nickname)
+
     _cfg = llm_config.task_config("chat_assistant")
 
     try:
@@ -278,3 +302,68 @@ async def onboarding_assistant(message: str, fallback_name: str) -> tuple[list[d
     except Exception as e:
         logger.error(f" onboarding_assistant failed: {e}")
         return [{"event": "error", "data": {"message": "Analysis failed."}}], ""
+
+async def sigmund_assistant(system_context: dict, history: list, message: str) -> tuple[Optional[str], Optional[str]]:
+    """Task 1b: The Sigmund Intercept. High-EQ psychological de-escalation."""
+    if not message:
+        return None, None
+
+    # Defensive type coercion
+    if isinstance(system_context, str):
+        try:
+            system_context = json.loads(system_context)
+        except Exception:
+            system_context = {"dietary_profile": system_context}
+    elif not isinstance(system_context, dict):
+        system_context = {}
+
+    ctx_str = (
+        f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}\n"
+        f"Active Menu Context: {json.dumps(system_context.get('current_menu', []))}"
+    )
+
+    hist_str = ""
+    for msg in history:
+        role = "User" if msg.get("role") == "user" else "Trigzi"
+        hist_str += f"{role}: {msg.get('content', '')}\n"
+
+    # INJECT into prompt builder:
+    prompt = SkillsLibrary.sigmund_assistant_prompt(
+        system_context=ctx_str,
+        history=hist_str,
+        message=message
+    )
+
+    # DYNAMIC CONFIG ROUTING - Fallback to chat_assistant config if sigmund isn't explicitly defined
+    _cfg = llm_config.task_config("chat_sigmund") 
+
+    try:
+        response = await router.analyze(
+            payload       = {"prompt": prompt},
+            profile       = "", 
+            model_strings = _cfg["models"], 
+            optimize      = "accuracy", # FORCE high-end model for EQ and safety
+            timeout       = _cfg.get("timeout", 15),
+        )
+        
+        raw_text = str(response.get("result", "")).strip()
+        
+        if raw_text.lower().startswith("response:"):
+            raw_text = raw_text[9:]
+        raw_text = raw_text.strip(" \n-")
+
+        # =================================================================
+        # THE ACTION INTERCEPTOR (UI OVERRIDES)
+        # =================================================================
+        action_command = None
+        action_match = re.search(r'\[ACTION:\s*([^\]]+)\]', raw_text)
+        
+        if action_match:
+            action_command = action_match.group(1).strip()
+            raw_text = re.sub(r'\[ACTION:\s*[^\]]+\]', '', raw_text).strip()
+
+        return raw_text, action_command
+
+    except Exception as e:
+        logger.error(f" sigmund_assistant failed: {e}")
+        return None, None

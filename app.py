@@ -13,7 +13,7 @@ from quart import Quart, jsonify, request, Response
 from core import data_manager
 from core.db import init_pool, close_pool
 from core.enricher import enrich
-from core.analyser import analyse_product, analyse_meal, analyse_menu, chat_assistant, chat_emoji, onboarding_assistant
+from core.analyser import analyse_product, analyse_meal, analyse_menu, chat_assistant, chat_emoji, onboarding_assistant, sigmund_assistant
 from core.telemetry import telemetry_bp, log_ocr_scan, log_menu_scan
 
 # --- BOMB-PROOF FILE LOGGING ---
@@ -155,15 +155,22 @@ async def analyse_menu_route():
 
     return jsonify({"status": "ok", "result": result}), 200
 
-@app.route('/api/v1/chat/stream', methods=['POST'])
-async def chat_stream_route():
-    data = await request.get_json()
-    if not data:
+@app.post("/api/v1/chat/stream")
+async def chat_stream_endpoint():
+    try:
+        data = await request.get_json() 
+        print("\n" + "🔥"*30)
+        print("📥 [APP.PY] INCOMING PAYLOAD FROM iOS:")
+        print(json.dumps(data, indent=2))
+        print("🔥"*30 + "\n")
+    except Exception as e:
+        print(f"❌ Failed to parse incoming JSON: {e}")
         return jsonify({"error": "Invalid payload."}), 400
 
-    system_context = data.get('system_context', {})
-    history        = data.get('history', [])
-    message        = data.get('message', '')
+    system_context  = data.get('system_context', {})
+    history         = data.get('history', [])
+    message         = data.get('message', '')
+    trigzi_nickname = data.get('trigzi_nickname', 'Trigzi')
 
     if isinstance(message, str): 
         message = message.strip()
@@ -176,23 +183,35 @@ async def chat_stream_route():
 
     async def generate():
         try:
-            # 1. Pipeline Stage 1: The Heavy Lift (Haiku)
-            text = await chat_assistant(system_context, history, message)
+            # 1. Pipeline Stage 1: The Heavy Lift
+            text, action_cmd = await chat_assistant(system_context, history, message, trigzi_nickname)
+            
             if not text:
                 yield _sse("error", {"message": "Analysis failed."})
                 return
          
-            yield _sse("text", {"content": text})
+            # 🧹 Strip the schema scaffolding before sending down the wire
+            clean_text = text.replace("Message: ", "").replace("Message:", "").replace("\nAction:", "").replace("Action:", "").strip()
+            
+            if clean_text:
+                yield _sse("text", {"content": clean_text})
 
-            # 2. Pipeline Stage 2: The UI Flourish (Flash-Lite)
-            emoji = await chat_emoji(text)
-            if emoji:
-                yield _sse("emoji", {"content": f" {emoji}"})
+            # 🛠️ Safely parse and yield the action command if one exists
+            if action_cmd:
+                tool_parts = action_cmd.split("|", 1)
+                tool = tool_parts[0].strip()
+                param = tool_parts[1].strip() if len(tool_parts) > 1 else ""
+                yield _sse("action", {"tool": tool, "param": param})
+
+            # 2. Pipeline Stage 2: The UI Flourish
+            if clean_text:
+                emoji = await chat_emoji(clean_text)
+                if emoji:
+                    yield _sse("emoji", {"content": f" {emoji}"})
                 
             yield _sse("done", {})
             
         except Exception as e:
-            # Catch chat stream crashes and cleanly close the iOS chat bubble
             logger.error(f"Stream crashed: {str(e)}", exc_info=True)
             yield _sse("error", {"message": "An unexpected server error occurred."})
 
@@ -235,6 +254,7 @@ async def chat_onboarding_route():
 
     message = data.get('message', '')
     fallback_name = data.get('fallback_name', 'Zesty Koala')
+    trigzi_nickname = data.get('trigzi_nickname', 'Trigzi')
 
     if isinstance(message, str): 
         message = message.strip()
@@ -248,7 +268,7 @@ async def chat_onboarding_route():
     async def generate():
         try:
             # 1. The Heavy Lift: Get parsed events and the raw text
-            events, text_content = await onboarding_assistant(message, fallback_name)
+            events, text_content = await onboarding_assistant(message, fallback_name, trigzi_nickname)
             
             # 2. BANG ON WIRE: Instantly flush text, facts, and actions to iOS
             for evt in events:
@@ -268,6 +288,60 @@ async def chat_onboarding_route():
             yield _sse("error", {"message": "Analysis failed."})
 
     # This must be outdented to align with `async def generate():`
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control':     'no-cache',
+        'X-Accel-Buffering': 'no',
+        'Connection':        'keep-alive',
+    })
+
+@app.post("/api/v1/chat/sigmund")
+async def chat_sigmund_endpoint():
+    try:
+        data = await request.get_json() 
+        print("\n" + "🛡️"*30)
+        print("📥 [APP.PY] INCOMING SIGMUND INTERCEPT:")
+        print(json.dumps(data, indent=2))
+        print("🛡️"*30 + "\n")
+    except Exception as e:
+        print(f"❌ Failed to parse incoming JSON: {e}")
+        return jsonify({"error": "Invalid payload."}), 400
+
+    system_context  = data.get('system_context', {})
+    history         = data.get('history', [])
+    message         = data.get('message', '')
+
+    if isinstance(message, str): 
+        message = message.strip()
+        
+    if not message:
+        logger.error("Missing message in Sigmund request")
+        return jsonify({"error": "Missing message."}), 400
+
+    async def generate():
+        try:
+            # 1. The Heavy Lift (High-EQ Model)
+            text, action_cmd = await sigmund_assistant(system_context, history, message)
+            
+            if not text:
+                yield _sse("error", {"message": "Analysis failed."})
+                return
+         
+            yield _sse("text", {"content": text})
+
+            # 2. Hard Crisis Escalation Catch
+            if action_cmd:
+                tool_parts = action_cmd.split("|", 1)
+                tool = tool_parts[0].strip()
+                param = tool_parts[1].strip() if len(tool_parts) > 1 else ""
+                yield _sse("action", {"tool": tool, "param": param})
+
+            # NO EMOJI FLOURISH FOR CRISIS ROUTING
+            yield _sse("done", {})
+            
+        except Exception as e:
+            logger.error(f"Sigmund stream crashed: {str(e)}", exc_info=True)
+            yield _sse("error", {"message": "An unexpected server error occurred."})
+
     return Response(generate(), mimetype='text/event-stream', headers={
         'Cache-Control':     'no-cache',
         'X-Accel-Buffering': 'no',

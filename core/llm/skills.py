@@ -47,23 +47,35 @@ class SkillsLibrary:
         return template.format(menu_text=ocr_text)
 
     @staticmethod
-    def chat_assistant_prompt(system_context: str, history: str, message: str) -> str:
+    def chat_assistant_prompt(system_context: str, history: str, message: str, trigzi_nickname: str = "Trigzi", persona_instruction: str = "") -> str:
         template = SkillsLibrary._load_prompt('chat_assistant.txt')
         return template.format(
             system_context=system_context,
             history=history,
-            message=message
+            message=message,
+            trigzi_nickname=trigzi_nickname,
+            persona_instruction=persona_instruction # <-- MUST BE HERE
         )
-  
+ 
     @staticmethod
     def chat_emoji_prompt(text: str) -> str:
         template = SkillsLibrary._load_prompt('chat_emoji.txt')
         return template.format(text=text)
 
     @staticmethod
-    def onboarding_prompt(message: str, fallback_name: str) -> str:
+    def onboarding_prompt(message: str, fallback_name: str, trigzi_nickname: str = "Trigzi") -> str:
         template = SkillsLibrary._load_prompt('onboarding.txt')
         return template.format(
             message=message,
-            fallback_name=fallback_name
+            fallback_name=fallback_name,
+            trigzi_nickname=trigzi_nickname
+        )
+
+    @staticmethod
+    def sigmund_assistant_prompt(system_context: str, history: str, message: str) -> str:
+        template = SkillsLibrary._load_prompt('sigmund_assistant.txt')
+        return template.format(
+            system_context=system_context,
+            history=history,
+            message=message
         )

@@ -66,6 +66,26 @@ def get_task_payload_and_prompt(task, content):
         user_prompt = f"[PRODUCT DATA]\n{content}\n\n[OUTPUT FORMAT]\nReturn strictly JSON."
         return {"prompt": f"{system_prompt}\n\n{user_prompt}"}, user_prompt
 
+    elif task == "chat_sigmund":
+        data = json.loads(content)
+        
+        ctx_str = (
+            f"Dietary Profile: {json.dumps(data.get('system_context', {}).get('dietary_profile', {}))}\n"
+            f"Active Menu Context: {json.dumps(data.get('system_context', {}).get('current_menu', []))}"
+        )
+        
+        hist_str = ""
+        for msg in data.get("history", []):
+            role = "User" if msg.get("role") == "user" else "Trigzi"
+            hist_str += f"{role}: {msg.get('content', '')}\n"
+
+        prompt = SkillsLibrary.sigmund_assistant_prompt(
+            system_context=ctx_str,
+            history=hist_str,
+            message=data.get("message", "")
+        )
+        return {"prompt": prompt}, prompt
+
     raise ValueError(f"Payload builder not implemented for task: '{task}'")
 
 async def execute_llm_request(model_name, payload):

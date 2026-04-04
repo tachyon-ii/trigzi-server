@@ -1,0 +1,36 @@
+{
+  "description": "Sigmund Intercept",
+  "path": "/api/v1/chat/sigmund",
+  "method": "POST",
+  "response_type": "sse",
+  "test_payload": {
+    "system_context": {"dietary_profile": "user_name: James"},
+    "history": [],
+    "message": "I feel completely overwhelmed and want to give up."
+  },
+  "sse_schemas": {
+    "text": {
+      "type": "object",
+      "properties": {"content": {"type": "string"}},
+      "required": ["content"],
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "object",
+      "properties": {"tool": {"type": "string"}, "param": {"type": "string"}},
+      "required": ["tool"],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {"message": {"type": "string"}},
+      "required": ["message"],
+      "additionalProperties": false
+    },
+    "done": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+}

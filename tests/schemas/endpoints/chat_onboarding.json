@@ -1,0 +1,48 @@
+{
+  "description": "Onboarding Chat",
+  "path": "/api/v1/chat/onboarding",
+  "method": "POST",
+  "response_type": "sse",
+  "test_payload": {
+    "message": "My name is James",
+    "fallback_name": "TestSubject",
+    "trigzi_nickname": "Trigzi"
+  },
+  "sse_schemas": {
+    "text": {
+      "type": "object",
+      "properties": {"content": {"type": "string"}},
+      "required": ["content"],
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "object",
+      "properties": {"tool": {"type": "string"}, "param": {"type": "string"}},
+      "required": ["tool"],
+      "additionalProperties": false
+    },
+    "fact": {
+      "type": "object",
+      "properties": {"key": {"type": "string"}, "value": {"type": "string"}},
+      "required": ["key", "value"],
+      "additionalProperties": false
+    },
+    "emoji": {
+      "type": "object",
+      "properties": {"content": {"type": "string"}},
+      "required": ["content"],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {"message": {"type": "string"}},
+      "required": ["message"],
+      "additionalProperties": false
+    },
+    "done": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+}

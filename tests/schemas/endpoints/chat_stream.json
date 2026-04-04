@@ -1,0 +1,43 @@
+{
+  "description": "Standard RAG Chat",
+  "path": "/api/v1/chat/stream",
+  "method": "POST",
+  "response_type": "sse",
+  "test_payload": {
+    "system_context": {"dietary_profile": "user_name: James", "attitude_level": 1},
+    "history": [],
+    "message": "What is my name?",
+    "sentiment_score": 0.0
+  },
+  "sse_schemas": {
+    "text": {
+      "type": "object",
+      "properties": {"content": {"type": "string"}},
+      "required": ["content"],
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "object",
+      "properties": {"tool": {"type": "string"}, "param": {"type": "string"}},
+      "required": ["tool"],
+      "additionalProperties": false
+    },
+    "emoji": {
+      "type": "object",
+      "properties": {"content": {"type": "string"}},
+      "required": ["content"],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {"message": {"type": "string"}},
+      "required": ["message"],
+      "additionalProperties": false
+    },
+    "done": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+}
