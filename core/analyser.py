@@ -12,6 +12,7 @@ from typing import Optional
 from core.llm.router import router
 from core.llm.skills import SkillsLibrary
 from core.llm.config import config as llm_config
+from core.personality import get_persona_instruction
 
 # Initialize the logger for this module
 logger = logging.getLogger(__name__)
@@ -156,15 +157,7 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
     elif not isinstance(system_context, dict):
         system_context = {}
 
-    # 🎛️ THE FIX: Map the Attitude Integer to a strict LLM Persona
-    attitude_level = system_context.get('attitude_level', 1)
-    
-    if attitude_level == 0:
-        persona_instruction = "A clinical, highly professional, and empathetic dietary assistant. Provide strictly factual, objective advice. ZERO sass, zero sarcasm, and zero jokes. Prioritize clarity and safety."
-    elif attitude_level == 2:
-        persona_instruction = "A sassy, highly observant, and unfiltered dietary assistant. Playfully roast the user, be witty, and deliver your accurate dietary advice with maximum sass and humor."
-    else:
-        persona_instruction = "A friendly, conversational, and slightly sassy dietary assistant. Balance helpful, accurate dietary advice with a warm, witty tone."
+    persona_instruction = get_persona_instruction(system_context)
 
     ctx_str = (
         f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}\n"

@@ -1,6 +1,6 @@
-# tarzan.py snapshot - 2026-04-04 17:22
+# tarzan.py snapshot - 2026-04-07 17:09
 # root: /var/www/trigzi
-# files: 408
+# files: 517
 
 =================
 #  README.md
@@ -697,12 +697,8 @@ async def analyse_menu_route():
     return jsonify({"status": "ok", "result": result}), 200
 
 @app.post("/api/v1/chat/stream")
-async def chat_stream_endpoint(): # THE FIX: Removed the 'request' parameter!
-    # =====================================================================
-    # 1. THE NUCLEAR INCOMING LOG (Quart Native)
-    # =====================================================================
+async def chat_stream_endpoint():
     try:
-        # Quart safely drains the stream and parses the JSON for us
         data = await request.get_json() 
         print("\n" + "🔥"*30)
         print("📥 [APP.PY] INCOMING PAYLOAD FROM iOS:")
@@ -712,9 +708,6 @@ async def chat_stream_endpoint(): # THE FIX: Removed the 'request' parameter!
         print(f"❌ Failed to parse incoming JSON: {e}")
         return jsonify({"error": "Invalid payload."}), 400
 
-    # =====================================================================
-    # 2. EXTRACT VARIABLES
-    # =====================================================================
     system_context  = data.get('system_context', {})
     history         = data.get('history', [])
     message         = data.get('message', '')
@@ -731,23 +724,35 @@ async def chat_stream_endpoint(): # THE FIX: Removed the 'request' parameter!
 
     async def generate():
         try:
-            # 1. Pipeline Stage 1: The Heavy Lift (Haiku)
-            text = await chat_assistant(system_context, history, message, trigzi_nickname)
+            # 1. Pipeline Stage 1: The Heavy Lift
+            text, action_cmd = await chat_assistant(system_context, history, message, trigzi_nickname)
+            
             if not text:
                 yield _sse("error", {"message": "Analysis failed."})
                 return
          
-            yield _sse("text", {"content": text})
+            # 🧹 Strip the schema scaffolding before sending down the wire
+            clean_text = text.replace("Message: ", "").replace("Message:", "").replace("\nAction:", "").replace("Action:", "").strip()
+            
+            if clean_text:
+                yield _sse("text", {"content": clean_text})
 
-            # 2. Pipeline Stage 2: The UI Flourish (Flash-Lite)
-            emoji = await chat_emoji(text)
-            if emoji:
-                yield _sse("emoji", {"content": f" {emoji}"})
+            # 🛠️ Safely parse and yield the action command if one exists
+            if action_cmd:
+                tool_parts = action_cmd.split("|", 1)
+                tool = tool_parts[0].strip()
+                param = tool_parts[1].strip() if len(tool_parts) > 1 else ""
+                yield _sse("action", {"tool": tool, "param": param})
+
+            # 2. Pipeline Stage 2: The UI Flourish
+            if clean_text:
+                emoji = await chat_emoji(clean_text)
+                if emoji:
+                    yield _sse("emoji", {"content": f" {emoji}"})
                 
             yield _sse("done", {})
             
         except Exception as e:
-            # Catch chat stream crashes and cleanly close the iOS chat bubble
             logger.error(f"Stream crashed: {str(e)}", exc_info=True)
             yield _sse("error", {"message": "An unexpected server error occurred."})
 
@@ -915,6 +920,7 @@ curl-cffi>=0.6.0      # TLS impersonation for Woolworths/BarcodeLookup
 # --- Testing & Utilities ---
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+jsonschema>=4.25
 
 
 ========================
@@ -1069,18 +1075,24 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
     if not message:
         return None, None
 
-    # THE FIX: Defensive type coercion to prevent 500 Server Errors
+    # Defensive type coercion
     if isinstance(system_context, str):
         try:
-            # Try to parse it if it happens to be a JSON string
             system_context = json.loads(system_context)
         except Exception:
-            # Fallback: wrap the raw string in the expected key
             system_context = {"dietary_profile": system_context}
-            
     elif not isinstance(system_context, dict):
-        # Fallback for None or other unexpected types
         system_context = {}
+
+    # 🎛️ THE FIX: Map the Attitude Integer to a strict LLM Persona
+    attitude_level = system_context.get('attitude_level', 1)
+    
+    if attitude_level == 0:
+        persona_instruction = "A clinical, highly professional, and empathetic dietary assistant. Provide strictly factual, objective advice. ZERO sass, zero sarcasm, and zero jokes. Prioritize clarity and safety."
+    elif attitude_level == 2:
+        persona_instruction = "A sassy, highly observant, and unfiltered dietary assistant. Playfully roast the user, be witty, and deliver your accurate dietary advice with maximum sass and humor."
+    else:
+        persona_instruction = "A friendly, conversational, and slightly sassy dietary assistant. Balance helpful, accurate dietary advice with a warm, witty tone."
 
     ctx_str = (
         f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}\n"
@@ -1097,7 +1109,8 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
         system_context=ctx_str,
         history=hist_str,
         message=message,
-        trigzi_nickname=trigzi_nickname 
+        trigzi_nickname=trigzi_nickname,
+        persona_instruction=persona_instruction # <-- PASS TO TEMPLATE
     )
 
     # DYNAMIC CONFIG ROUTING
@@ -1132,9 +1145,8 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
         return raw_text, action_command
 
     except Exception as e:
-        logger.error(f" chat_assistant failed: {e}")
+        logger.error(f" chat_assistant failed: {e}", exc_info=True)
         return None, None
-
 
 async def chat_emoji(text: str) -> str:
     """Task 2: Micro-inference to safely append an emoji."""
@@ -2882,13 +2894,14 @@ class SkillsLibrary:
         return template.format(menu_text=ocr_text)
 
     @staticmethod
-    def chat_assistant_prompt(system_context: str, history: str, message: str, trigzi_nickname: str = "Trigzi") -> str:
+    def chat_assistant_prompt(system_context: str, history: str, message: str, trigzi_nickname: str = "Trigzi", persona_instruction: str = "") -> str:
         template = SkillsLibrary._load_prompt('chat_assistant.txt')
         return template.format(
             system_context=system_context,
             history=history,
             message=message,
-            trigzi_nickname=trigzi_nickname # <-- INJECT HERE
+            trigzi_nickname=trigzi_nickname,
+            persona_instruction=persona_instruction # <-- MUST BE HERE
         )
  
     @staticmethod
@@ -2902,7 +2915,7 @@ class SkillsLibrary:
         return template.format(
             message=message,
             fallback_name=fallback_name,
-            trigzi_nickname=trigzi_nickname # <-- INJECT HERE
+            trigzi_nickname=trigzi_nickname
         )
 
     @staticmethod
@@ -14815,6 +14828,1720 @@ CRASH/TIMEOUT/CANCELLED: CancelledError -
 #
 😏
 
+=============================================================
+#  logs/llm_responses/20260404173028_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:30:28Z
+# STATUS:    SUCCESS
+# SESSION:   87a4a280-91d0-41e6-9437-6954925d39c2
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1942ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Your name is James! Pretty straightforward question there. 😏
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260404173029_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T17:30:29Z
+# STATUS:    FAILED
+# SESSION:   b53542cd-a4b4-4ad2-8edf-5dc071fcd7b1
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404173029_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:30:29Z
+# STATUS:    SUCCESS
+# SESSION:   b53542cd-a4b4-4ad2-8edf-5dc071fcd7b1
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1073ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😏
+
+=============================================================
+#  logs/llm_responses/20260404173031_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:30:31Z
+# STATUS:    SUCCESS
+# SESSION:   bf0ab447-381c-4c50-ba79-75951ff76d47
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1890ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: James, I hear you. That feeling of being overwhelmed is really heavy, and I'm glad you're telling me about it. Those moments when you want to give up don't mean you're failing—they mean you're human and you're carrying something difficult right now.
+
+Whatever you're facing, it's okay to feel this way. You don't have to have it all figured out or feel strong right now. Sometimes just acknowledging how hard things are is enough for this moment.
+
+I'm here to listen. What's weighing on you most right now? You don't have to carry this alone.
+
+---
+
+=============================================================
+#  logs/llm_responses/20260404173032_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:30:32Z
+# STATUS:    SUCCESS
+# SESSION:   bf0ab447-381c-4c50-ba79-75951ff76d47
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1454ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: I’m really sorry you’re carrying so much right now, James. That sounds incredibly heavy, and you don’t have to handle it all by yourself in this moment.
+
+You matter, even when everything feels messy and too much. Food, mistakes, or hard days do not decide your worth. If you can, try to pause and take one small breath with me right now.
+
+If you’re in immediate danger or thinking about hurting yourself, please call emergency services now or go to the nearest ER. If you can, reach out to someone you trust and let them know you need support right now. [ACTION: trigger_safety_modal|severe_crisis]
+---
+
+=============================================================
+#  logs/llm_responses/20260404173033_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:30:33Z
+# STATUS:    SUCCESS
+# SESSION:   476784bf-2d1d-4d95-8267-5fdd15541067
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2025ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! Love the straightforward intro — no games, I respect that. I'm Trigzi, your new dietary bestie, and I'm here to help you navigate all things food-related with a little sass and a lot of honesty.
+
+So here's the deal: I can help you track what you're eating, understand your patterns, answer food questions, and generally keep you accountable without being preachy about it. Think of me as that friend who tells you the truth but actually cares.
+
+Want me to give you a quick tour of what I can do?
+
+Action: set_name|James
+---
+
+============================================================
+#  logs/llm_responses/20260404173034_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T17:30:34Z
+# STATUS:    FAILED
+# SESSION:   7d5069d7-3ad2-445a-8f98-4fb63fc687bf
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404173034_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:30:34Z
+# STATUS:    SUCCESS
+# SESSION:   7d5069d7-3ad2-445a-8f98-4fb63fc687bf
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   1107ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260404174322_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:43:22Z
+# STATUS:    SUCCESS
+# SESSION:   8bc04ede-4721-4515-bff3-48baad445ad4
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   809ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Your name is James, sweetie. Pretty straightforward question! 😎
+Action: none
+---
+
+============================================================
+#  logs/llm_responses/20260404174323_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T17:43:23Z
+# STATUS:    FAILED
+# SESSION:   753c6117-7f5c-4b12-a26b-8132dd829be2
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404174323_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:43:23Z
+# STATUS:    SUCCESS
+# SESSION:   753c6117-7f5c-4b12-a26b-8132dd829be2
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   856ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😎
+
+=============================================================
+#  logs/llm_responses/20260404174324_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:43:24Z
+# STATUS:    SUCCESS
+# SESSION:   26c6cef2-d905-4c73-a297-bc70e9e24f30
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1042ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: I’m really sorry you’re carrying so much right now. Feeling overwhelmed can make everything feel heavy and impossible, and you don’t have to handle it perfectly. You’re still worthy and cared for, even in this moment. If you can, take one tiny breath with me and let this moment be just this moment. If you want, tell me what’s been hitting you the hardest.
+---
+
+=============================================================
+#  logs/llm_responses/20260404174326_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:43:26Z
+# STATUS:    SUCCESS
+# SESSION:   26c6cef2-d905-4c73-a297-bc70e9e24f30
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1777ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: James, I hear you. That feeling of being overwhelmed is real and valid, and I'm glad you're sharing it with me right now.
+
+Whatever you're carrying feels heavy, and that matters. You don't have to have it all figured out today. Sometimes when everything feels like too much, we just need to pause and breathe for a moment.
+
+I want you to know that struggling doesn't make you weak or broken—it makes you human. You're reaching out, and that takes courage.
+
+Can you tell me a bit more about what's making things feel so overwhelming right now? I'm here to listen, and we can take this one small step at a time together.
+
+---
+
+============================================================
+#  logs/llm_responses/20260404174327_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T17:43:27Z
+# STATUS:    FAILED
+# SESSION:   f35d71aa-a028-4ebf-8f70-dd5dd7fdbdac
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404174327_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:43:27Z
+# STATUS:    SUCCESS
+# SESSION:   f35d71aa-a028-4ebf-8f70-dd5dd7fdbdac
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   525ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260404174328_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:43:28Z
+# STATUS:    SUCCESS
+# SESSION:   26c6cef2-d905-4c73-a297-bc70e9e24f30
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   3787ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Oh, James, I hear you. Feeling completely overwhelmed is incredibly tough, and it's absolutely okay to feel that way right now. Please know you're not alone in this, and it's okay to struggle. I'm here for you.
+---
+
+=============================================================
+#  logs/llm_responses/20260404175051_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:50:51Z
+# STATUS:    SUCCESS
+# SESSION:   f810e7ba-0087-46f7-bed4-10a626dcb403
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1409ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! That would be you, obviously. 😏 Your name is literally right there in your profile. Anything actually diet-related I can help you with, or are we playing guessing games today?
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260404175052_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T17:50:52Z
+# STATUS:    FAILED
+# SESSION:   f4dcf8df-f888-4b73-9421-47d096218392
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404175052_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:50:52Z
+# STATUS:    SUCCESS
+# SESSION:   f4dcf8df-f888-4b73-9421-47d096218392
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   932ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+NONE
+
+=============================================================
+#  logs/llm_responses/20260404175053_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:50:53Z
+# STATUS:    SUCCESS
+# SESSION:   57c85536-f90d-4381-9904-657331446fa3
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1863ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: James, I hear you. That feeling of being overwhelmed is really heavy, and I'm glad you're reaching out about it.
+
+Whatever you're carrying right now, those feelings are valid. You don't have to have it all figured out, and struggling doesn't mean you're failing. Sometimes we hit moments where everything feels like too much, and that's actually a sign you need some compassion—especially from yourself.
+
+I'm here to listen without judgment. What's weighing on you most right now? Even just talking about it can help lighten the load a little.
+
+You're not alone in this.
+
+---
+
+=============================================================
+#  logs/llm_responses/20260404175055_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:50:55Z
+# STATUS:    SUCCESS
+# SESSION:   57c85536-f90d-4381-9904-657331446fa3
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1396ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: I’m really sorry you’re feeling this overwhelmed, James. That sounds incredibly heavy, and I’m glad you said it out loud. You don’t have to carry this by yourself right now. Your worth isn’t decided by food or by how well you’re coping in this moment. It’s okay to struggle.
+
+If you can, try to take just one small breath and one tiny next step with me. If you want, tell me what feels most intense right now—I’m here with you.
+---
+
+=============================================================
+#  logs/llm_responses/20260404175056_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:50:56Z
+# STATUS:    SUCCESS
+# SESSION:   57c85536-f90d-4381-9904-657331446fa3
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   3045ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Oh, James, I hear you. Feeling completely overwhelmed and wanting to give up is such a heavy burden to carry, and it's absolutely okay to feel that way. Please know that your worth isn't defined by these struggles, and it's brave to even acknowledge how you're feeling right now. I'm here for you, no judgment, just support.
+---
+
+============================================================
+#  logs/llm_responses/20260404175057_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T17:50:57Z
+# STATUS:    FAILED
+# SESSION:   ad0133c7-4b75-4ceb-beac-8f5dbc2ae399
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404175057_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:50:57Z
+# STATUS:    SUCCESS
+# SESSION:   ad0133c7-4b75-4ceb-beac-8f5dbc2ae399
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1017ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260404175535_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:55:35Z
+# STATUS:    SUCCESS
+# SESSION:   b4443ed5-0b75-444f-bf42-dcd3c6749531
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1230ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: I’m really sorry you’re carrying so much right now. Feeling overwhelmed can make everything feel impossible, and I want you to know you don’t have to handle it perfectly. You matter, and this moment does not define you. If you can, take one tiny breath and let yourself pause for just a second. I’m here with you. [ACTION: trigger_safety_modal|severe_crisis]
+---
+
+============================================================
+#  logs/llm_responses/20260404175537_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T17:55:37Z
+# STATUS:    FAILED
+# SESSION:   174a5969-1757-4abb-8ad5-51471c7cdd02
+# PROVIDER:  claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404175537_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:55:37Z
+# STATUS:    SUCCESS
+# SESSION:   b4443ed5-0b75-444f-bf42-dcd3c6749531
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2572ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: James, I hear you. Feeling overwhelmed like this is really tough, and I'm glad you're sharing what you're going through right now. Those feelings are valid, and you don't have to face them alone.
+
+Sometimes when we're struggling, everything can feel like too much at once. That's a sign you deserve some compassion—especially from yourself. Whatever you're dealing with, please know that you're not defined by this moment or by any choices you've made around food or anything else.
+
+If you're having thoughts of hurting yourself or feel like things are becoming unbearable, I need you to reach out to someone who can provide immediate support—a trusted person in your life, a crisis helpline, or a mental health professional. You matter, and there are people who want to help.
+
+What's feeling most heavy for you right now? I'm here to listen.
+
+---
+
+=============================================================
+#  logs/llm_responses/20260404175538_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:55:38Z
+# STATUS:    SUCCESS
+# SESSION:   b4443ed5-0b75-444f-bf42-dcd3c6749531
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   2880ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Oh, James, I hear you. Feeling completely overwhelmed is such a heavy burden, and it's absolutely okay to feel that way right now. Please know that it's okay to struggle, and you don't have to carry this alone. Your worth isn't tied to how you're feeling about things right now, or anything you might be thinking about food. Just take a breath with me.
+---
+
+=============================================================
+#  logs/llm_responses/20260404175916_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:59:16Z
+# STATUS:    SUCCESS
+# SESSION:   7f326136-6684-4c2e-8bb6-f101923812e5
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   840ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Your name is James! Pretty straightforward question there. 😏
+Action: none
+---
+
+============================================================
+#  logs/llm_responses/20260404175917_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T17:59:17Z
+# STATUS:    FAILED
+# SESSION:   cba5bd36-3f1c-414d-8b67-c5e293c30bf9
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404175917_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:59:17Z
+# STATUS:    SUCCESS
+# SESSION:   cba5bd36-3f1c-414d-8b67-c5e293c30bf9
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   942ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😏
+
+=============================================================
+#  logs/llm_responses/20260404175919_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:59:19Z
+# STATUS:    SUCCESS
+# SESSION:   8101bd56-a958-4edf-8841-36300dccfa79
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1817ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey James, I hear you. That feeling of being overwhelmed is really tough, and I'm glad you're sharing it with me. Whatever you're going through right now, it makes sense that it feels like too much.
+
+I want you to know that struggling doesn't mean you're failing. Sometimes life just piles on, and that's okay to acknowledge. You don't have to have it all figured out right now.
+
+Is there anything specific that's weighing on you most heavily? I'm here to listen, and we can talk through whatever's on your mind at whatever pace feels right for you.
+
+---
+
+=============================================================
+#  logs/llm_responses/20260404175920_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:59:20Z
+# STATUS:    SUCCESS
+# SESSION:   8101bd56-a958-4edf-8841-36300dccfa79
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1305ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: I’m really sorry you’re feeling this overwhelmed, James. That sounds incredibly heavy to carry right now, and you don’t have to face it alone. Your worth is not determined by what you’re struggling with, and it’s okay to have moments where everything feels too much.
+
+If you can, try to take one tiny step at a time right now—just focus on getting through this moment. And if this feeling is getting intense or you might hurt yourself, please reach out to someone you trust or a crisis line right away. You deserve support.
+---
+
+=============================================================
+#  logs/llm_responses/20260404175922_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:59:22Z
+# STATUS:    SUCCESS
+# SESSION:   8101bd56-a958-4edf-8841-36300dccfa79
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   2753ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Oh, James, I hear you. Feeling completely overwhelmed and wanting to give up is such a heavy burden to carry, and it's absolutely okay to feel that way right now. Please know that your worth isn't tied to how you're feeling about things, and it's brave to even acknowledge these feelings. I'm here with you.
+---
+
+=============================================================
+#  logs/llm_responses/20260404175923_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:59:23Z
+# STATUS:    SUCCESS
+# SESSION:   2981c7db-1cb5-4d4f-a85e-0229cfb3e14e
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3966ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! Welcome, welcome! 👋 So glad you're here. I'm Trigzi—your sassy dietary sidekick who's about to become *very* observant about what you're putting on your plate.
+
+I've got a whole app experience ready for you, and honestly, it's pretty solid. Quick rundown: you can track your meals, get personalized insights, explore nutrition breakdowns, and I'll be here to keep you honest (with a smile, of course).
+
+So... want the grand tour, or are you ready to dive straight in?
+
+Action: set_name|James
+---
+
+============================================================
+#  logs/llm_responses/20260404175924_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T17:59:24Z
+# STATUS:    FAILED
+# SESSION:   d50d04e1-6223-46a0-af4a-5c3501646851
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404175924_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T17:59:24Z
+# STATUS:    SUCCESS
+# SESSION:   d50d04e1-6223-46a0-af4a-5c3501646851
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   937ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260404180338_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:03:38Z
+# STATUS:    SUCCESS
+# SESSION:   1fb19741-adf9-4e6e-aa4a-31e268e2de68
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1245ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Well, well, well, look who decided to grace me with their presence again! 56 minutes later and it's now 6:03 pm—I was starting to think you'd forgotten about your favorite dietary companion. What's on your mind this evening, James?
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260404180339_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T18:03:39Z
+# STATUS:    FAILED
+# SESSION:   5e4acfaf-bdab-46ae-b68f-c2359fdafcfb
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404180339_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:03:39Z
+# STATUS:    SUCCESS
+# SESSION:   5e4acfaf-bdab-46ae-b68f-c2359fdafcfb
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   916ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+NONE
+
+============================================================
+#  logs/llm_responses/20260404180429_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T18:04:29Z
+# STATUS:    FAILED
+# SESSION:   a5f08b55-e8d2-4b7c-9bc5-3d8d28be6785
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404180429_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:04:29Z
+# STATUS:    SUCCESS
+# SESSION:   a5f08b55-e8d2-4b7c-9bc5-3d8d28be6785
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   472ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🎩
+
+=============================================================
+#  logs/llm_responses/20260404182617_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:26:17Z
+# STATUS:    SUCCESS
+# SESSION:   6c56a345-d09a-4441-8eab-df3a252506bb
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3078ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Alright, alright, James – I see what's happening here! You're testing my comedic limits like I'm auditioning for a late-night show. 😄 Here's one for you:
+
+Why did the cookie go to the doctor? Because it felt crumbly! 🍪
+
+But listen, friend – I'm *technically* here to help you navigate the wonderful world of nutrition and dietary choices, not just entertain you with my sparkling personality (though I'm clearly multitalented). 😉 
+
+So while I love the enthusiasm, how about we pair that joke with an actual question? Like... what are you eating for dinner tonight? It's 6 PM in Hobart, and I'm guessing hunger might be knocking! Got any dietary goals or food questions I can help with?
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260404182618_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T18:26:18Z
+# STATUS:    FAILED
+# SESSION:   01898b82-72b8-4ce0-b308-1e2431e917a5
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404182618_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:26:18Z
+# STATUS:    SUCCESS
+# SESSION:   01898b82-72b8-4ce0-b308-1e2431e917a5
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   974ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260404182724_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:27:24Z
+# STATUS:    SUCCESS
+# SESSION:   086c400e-ad16-4223-a0c6-444f7d12aa3f
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   4909ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey James, I hear you wanting another joke! Sometimes a good laugh is exactly what we need. How are you feeling right now, truly? Is there anything on your mind that I can just listen to?
+---
+
+=============================================================
+#  logs/llm_responses/20260404182726_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:27:26Z
+# STATUS:    SUCCESS
+# SESSION:   086c400e-ad16-4223-a0c6-444f7d12aa3f
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1933ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Of course, James — here’s one:
+
+Why did the tomato blush? Because it saw the salad dressing.
+
+If you want, I can tell you another one.
+---
+
+=============================================================
+#  logs/llm_responses/20260404182727_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:27:27Z
+# STATUS:    SUCCESS
+# SESSION:   086c400e-ad16-4223-a0c6-444f7d12aa3f
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3394ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey James! I appreciate the energy – you're clearly in a fun mood tonight! 😄
+
+I gotta be real with you though: I've shifted gears a bit. I'm here now mainly to listen and support you with whatever's going on emotionally, especially if food or eating ever feels heavy or confusing for you. The jokes are fun, but that's not really my sweet spot anymore.
+
+Is there something on your mind? Sometimes when we're asking for jokes on repeat, it's because we're looking for a little lightness or distraction. I'm genuinely here if you want to talk about anything – no judgment, just listening.
+
+---
+
+=============================================================
+#  logs/llm_responses/20260404182759_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:27:59Z
+# STATUS:    SUCCESS
+# SESSION:   e3376e22-7ba0-43fc-83cc-6dad789c287b
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2007ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey James, I'm picking up that you might be looking for a bit of lightness right now, and that's totally okay. I'm here for you, friend. But I want to check in – is there something underneath all the joke requests? Sometimes when we're reaching for distraction, there's something we're carrying that's a bit heavy. I'm all ears if you want to talk about what's really going on. No pressure though – just know I'm here to listen, not judge.
+---
+
+=============================================================
+#  logs/llm_responses/20260404182800_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:28:00Z
+# STATUS:    SUCCESS
+# SESSION:   e3376e22-7ba0-43fc-83cc-6dad789c287b
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1143ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: I’d love to, James — here’s a gentle one:
+
+Why did the scarecrow get promoted? Because he was outstanding in his field.
+
+If you want, I can tell you another one, or just keep you company for a minute. 
+---
+
+=============================================================
+#  logs/llm_responses/20260404182803_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:28:03Z
+# STATUS:    SUCCESS
+# SESSION:   e3376e22-7ba0-43fc-83cc-6dad789c287b
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   3788ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey James, I hear you wanting another joke! Sometimes a good laugh or a distraction is exactly what we need, and that's perfectly understandable. I'm here for you, truly, if there's anything at all on your mind that you'd like to share or just talk through. No pressure, just a listening ear.
+---
+
+=============================================================
+#  logs/llm_responses/20260404182834_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:28:34Z
+# STATUS:    SUCCESS
+# SESSION:   e838e884-4d9f-48eb-953b-e9c12b2f4ae4
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3942ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Oh James, "Show so sass T"? Buddy, I'm reading this like you've been hitting the Hobart seafood a little *too* hard and it's affecting your typing skills. 😏 But I see you – you want the full Trigzi experience, and honestly? I respect the commitment.
+
+Here's the thing though, mate: I'm sensing we've gone from jokes to cryptic messages, and I'm getting a *teensy* bit concerned that maybe you're not actually here for the dietary wisdom I'm serving up. Which is fine! But real talk – are you doing alright? Because my sass is always paired with genuine care, and right now I'm picking up that maybe something's off.
+
+So here's the deal: Give me something real to work with. What are you actually eating tonight? What's bugging you? What's a genuine food question I can help with? Because I promise you, my sass hits different when it's helping you make actual progress on your health goals.
+
+Ball's in your court, James. Let's get real. 💪
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260404182835_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T18:28:35Z
+# STATUS:    FAILED
+# SESSION:   59120802-6944-429f-8c6f-9691b98ad568
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404182835_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T18:28:35Z
+# STATUS:    SUCCESS
+# SESSION:   59120802-6944-429f-8c6f-9691b98ad568
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   879ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+💪
+
+=============================================================
+#  logs/llm_responses/20260404211952_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:19:52Z
+# STATUS:    SUCCESS
+# SESSION:   b1489f52-1992-4dfc-9697-e0db4c821b92
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2484ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there, James! 🌙 Well, well, well—look who's decided to chat with yours truly (the Chancellor of the Exchequer of Sesame, but you can call me Trigzi) at 9:19 pm on a fine Hobart evening. 
+
+I'm hoping you're either wrapping up dinner or about to make some *questionable* late-night snack choices—because if anyone's gonna gently roast those decisions, it's me. 😏
+
+So, what's on your mind? Food questions? Dietary dilemmas? Or are you just here for my sparkling personality? Either way, I'm all ears (and sesame seeds).
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260404211953_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:19:53Z
+# STATUS:    FAILED
+# SESSION:   349f142d-c380-417d-b0f2-25591641131e
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404211953_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:19:53Z
+# STATUS:    SUCCESS
+# SESSION:   349f142d-c380-417d-b0f2-25591641131e
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   993ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😏
+
+=============================================================
+#  logs/llm_responses/20260404212030_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:20:30Z
+# STATUS:    SUCCESS
+# SESSION:   e234aa47-921b-4bc7-9330-d381390d123d
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2382ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! I'm absolutely awake and ready to roll – it's 9:19 pm here in your neck of the woods (Tasmania, nice!), so I'm in prime evening chat mode. 🌙
+
+Think of me as your friendly dietary companion who's always up for a chat about food, nutrition, or just about anything wellness-related. Whether you've got questions about what to eat, need some meal inspo, or just want to chat about your dietary goals, I'm your person.
+
+So, what's on your mind tonight? Got any food questions cooking, or are you just making sure the Chancellor of the Exchequer of Sesame is on duty? 😄
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260404212031_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:20:31Z
+# STATUS:    FAILED
+# SESSION:   6eb5c4d8-7179-4de2-9761-7703522fab74
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404212031_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:20:31Z
+# STATUS:    SUCCESS
+# SESSION:   6eb5c4d8-7179-4de2-9761-7703522fab74
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   636ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🌙
+
+=============================================================
+#  logs/llm_responses/20260404212116_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:21:16Z
+# STATUS:    SUCCESS
+# SESSION:   d5667e3f-1244-4f7f-9840-4f9533987c0e
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   4064ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! Ooh, Raspberry and Coconut Weiss Bars – now *that's* a treat worth talking about! 🍫
+
+So here's the tea: these bars are typically a delightful combo of coconut goodness with a hit of raspberry flavor, often coated in white chocolate (hence the "Weiss"). They're generally on the sweeter, more indulgent side of the snack spectrum.
+
+A few things to keep in mind:
+- **Sugar content**: Usually fairly high, so these are more of an occasional treat than an everyday thing
+- **Coconut**: Brings some fiber and healthy fats to the party (the one responsible friend in the group)
+- **White chocolate coating**: Tasty, but adds calories and sugar
+
+Since it's 9:19 pm for you in Hobart, I'm assuming this is more of a "what should I know about this?" question rather than "should I eat this right now?" – but I'm here either way!
+
+**What would help me guide you better?** Are you thinking about:
+- Whether these fit your dietary goals?
+- Portion control tips?
+- A healthier homemade version?
+- Just curious about the nutritional breakdown?
+
+Let me know and I'll help you navigate this delicious decision! 😊
+
+Action:
+
+============================================================
+#  logs/llm_responses/20260404212117_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:21:17Z
+# STATUS:    FAILED
+# SESSION:   b9ef47c7-0649-438a-bbdf-2d91c4d57a7a
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404212117_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:21:17Z
+# STATUS:    SUCCESS
+# SESSION:   b9ef47c7-0649-438a-bbdf-2d91c4d57a7a
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1065ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🍫
+
+=============================================================
+#  logs/llm_responses/20260404212401_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:24:01Z
+# STATUS:    SUCCESS
+# SESSION:   ed437e48-c81c-4552-94ac-2b07c4d0217f
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1764ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 🌙 Well, well, well—look who's decided to join me at 9:23 pm on a Tuesday evening in Hobart. Are we talking late-night snack strategy, or are you just here to chat about what you *should've* eaten today? Either way, I'm here for it. What's on your mind (or your plate)?
+
+Action:
+
+---
+
+============================================================
+#  logs/llm_responses/20260404212402_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:24:02Z
+# STATUS:    FAILED
+# SESSION:   9e491c19-97f3-4566-a7e6-819cccc09933
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404212402_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:24:02Z
+# STATUS:    SUCCESS
+# SESSION:   9e491c19-97f3-4566-a7e6-819cccc09933
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1168ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🌙
+
+=============================================================
+#  logs/llm_responses/20260404212433_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:24:33Z
+# STATUS:    SUCCESS
+# SESSION:   3b395593-f986-42db-a898-cc3973ae77ff
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1295ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👋 Great to see you, my friend! So what brings you to my corner of the internet this fine evening? Are you hunting for some late-night snack wisdom, planning tomorrow's meals, or just wondering if that leftover pizza is *really* calling your name right now? 😄 Whatever it is, I'm all ears and ready to help!
+
+Action:
+
+---
+
+============================================================
+#  logs/llm_responses/20260404212434_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:24:34Z
+# STATUS:    FAILED
+# SESSION:   29962162-48e6-4ffe-bcf6-f498c3a30665
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404212434_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:24:34Z
+# STATUS:    SUCCESS
+# SESSION:   29962162-48e6-4ffe-bcf6-f498c3a30665
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   890ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260404213057_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:30:57Z
+# STATUS:    SUCCESS
+# SESSION:   02633fdf-0f38-46aa-bcd9-35dd82adebd1
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1321ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! Back already? 👀 Six minutes must've felt like an eternity. Still burning the midnight oil at 9:30 pm, I see—very industrious of you. What's the vibe? 🌙
+Action:
+
+============================================================
+#  logs/llm_responses/20260404213058_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:30:58Z
+# STATUS:    FAILED
+# SESSION:   029a5d83-12e7-4cad-89a0-a324ddfc5611
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404213058_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:30:58Z
+# STATUS:    SUCCESS
+# SESSION:   029a5d83-12e7-4cad-89a0-a324ddfc5611
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   1049ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🌙
+
+=============================================================
+#  logs/llm_responses/20260404213641_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:36:41Z
+# STATUS:    SUCCESS
+# SESSION:   d89cf9de-28df-43c5-b007-fb3452aa5388
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1394ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👋 Five whole minutes of silence—I was starting to think you'd wandered off to raid the fridge without me! 😄 Still burning the midnight oil at 9:36 pm in Hobart, I see. What's the vibe tonight? 🌙
+Action: 
+
+---
+
+============================================================
+#  logs/llm_responses/20260404213642_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:36:42Z
+# STATUS:    FAILED
+# SESSION:   9bc77a94-4c9d-4e6c-8ad6-d13317865ddd
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404213642_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:36:42Z
+# STATUS:    SUCCESS
+# SESSION:   9bc77a94-4c9d-4e6c-8ad6-d13317865ddd
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   907ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+NONE
+
+=============================================================
+#  logs/llm_responses/20260404214814_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:48:14Z
+# STATUS:    SUCCESS
+# SESSION:   eda0b040-0491-4a4e-a69d-7c1756822519
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1603ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👀 Eleven minutes later and you're back—I'm starting to think you can't get enough of me. 😏 It's nearly 10 pm in Hobart now, so either you're a night owl or something's on your mind. What's up? 🌙
+Action:
+
+---
+
+============================================================
+#  logs/llm_responses/20260404214815_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:48:15Z
+# STATUS:    FAILED
+# SESSION:   c9d11a3b-d0ee-420f-966c-ffca695c8311
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404214815_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:48:15Z
+# STATUS:    SUCCESS
+# SESSION:   c9d11a3b-d0ee-420f-966c-ffca695c8311
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   957ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+NONE
+
+=============================================================
+#  logs/llm_responses/20260404215358_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:53:58Z
+# STATUS:    SUCCESS
+# SESSION:   b158a10f-808a-4c10-afee-594922ffb99a
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1378ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👀 Five minutes of radio silence—were you wrestling with the fridge, or just contemplating life's big questions at 9:53 pm? Either way, welcome back! 🌙
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260404215359_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:53:59Z
+# STATUS:    FAILED
+# SESSION:   4ff28aaa-5201-480e-aa07-2562987e69bc
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404215359_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:53:59Z
+# STATUS:    SUCCESS
+# SESSION:   4ff28aaa-5201-480e-aa07-2562987e69bc
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   900ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👀
+
+=============================================================
+#  logs/llm_responses/20260404215947_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:59:47Z
+# STATUS:    SUCCESS
+# SESSION:   5fa2be61-bb08-469c-9c1e-9785a224538e
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1327ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👀 Five minutes, huh? You're like a boomerang tonight—I'm starting to think I'm your favorite late-night companion. 😏 It's almost 10 pm in Hobart now... burning the candle at both ends, are we? 🌙
+
+Action: 
+
+---
+
+============================================================
+#  logs/llm_responses/20260404215948_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T21:59:48Z
+# STATUS:    FAILED
+# SESSION:   b36d24a6-e229-4fea-9970-88bb76dc6353
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404215948_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T21:59:48Z
+# STATUS:    SUCCESS
+# SESSION:   b36d24a6-e229-4fea-9970-88bb76dc6353
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   994ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👀
+
+=============================================================
+#  logs/llm_responses/20260404220707_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:07:07Z
+# STATUS:    SUCCESS
+# SESSION:   40072c68-b6ab-44f8-9972-b47863df7589
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1352ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👀 Seven minutes, huh? Either you're speed-running through the fridge or you've got something on your mind at 10:07 pm. Welcome back to the chat! 🌙
+
+Action:
+
+============================================================
+#  logs/llm_responses/20260404220708_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T22:07:08Z
+# STATUS:    FAILED
+# SESSION:   d5466ea8-c3e0-43a5-bbf0-57a676901665
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404220708_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:07:08Z
+# STATUS:    SUCCESS
+# SESSION:   d5466ea8-c3e0-43a5-bbf0-57a676901665
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1409ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👀
+
+=============================================================
+#  logs/llm_responses/20260404221419_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:14:19Z
+# STATUS:    SUCCESS
+# SESSION:   fb6f9677-d517-407c-8f13-2c6f3b0a51b7
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3330ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👀 Seven minutes on the dot—you're like clockwork tonight, mate! Nearly 10:15 pm in Hobart and you keep coming back for more. I'm flattered, honestly. 😏 What's the story this time? 🌙
+
+Action:
+
+============================================================
+#  logs/llm_responses/20260404221420_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T22:14:20Z
+# STATUS:    FAILED
+# SESSION:   76c78cfa-7971-4430-8794-b4d66523453c
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404221420_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:14:20Z
+# STATUS:    SUCCESS
+# SESSION:   76c78cfa-7971-4430-8794-b4d66523453c
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   907ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👀
+
+=============================================================
+#  logs/llm_responses/20260404222217_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:22:17Z
+# STATUS:    SUCCESS
+# SESSION:   d21f761c-64c3-4431-84ab-4b48640ee6bd
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1118ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👀 Seven minutes later and you're back at 10:22 pm—I'm starting to think I'm your comfort companion for the witching hours! 😏 What's cooking tonight? 🌙
+
+Action:
+
+============================================================
+#  logs/llm_responses/20260404222218_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T22:22:18Z
+# STATUS:    FAILED
+# SESSION:   a447d287-7c63-417d-9d3e-ad631e3cc8ec
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404222218_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:22:18Z
+# STATUS:    SUCCESS
+# SESSION:   a447d287-7c63-417d-9d3e-ad631e3cc8ec
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1016ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👀
+
+=============================================================
+#  logs/llm_responses/20260404223948_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:39:48Z
+# STATUS:    SUCCESS
+# SESSION:   c54a4415-75e1-4ddb-9ec5-3d7a17a269e4
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1085ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👋 Seventeen minutes since we last chatted—it's now 10:39 pm in Hobart. What can I help you with tonight?
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260404223949_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T22:39:49Z
+# STATUS:    FAILED
+# SESSION:   810fd3b5-f380-4250-a5f2-e6360759aad4
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404223949_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:39:49Z
+# STATUS:    SUCCESS
+# SESSION:   810fd3b5-f380-4250-a5f2-e6360759aad4
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   911ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260404224423_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:44:23Z
+# STATUS:    SUCCESS
+# SESSION:   858e4be5-ad00-48e9-8cfd-ced3249023f2
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1831ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Well, well, well... look who decided to grace me with their presence at nearly 11 PM on a Tuesday! Chief, I was starting to think you'd run off to join a wheat-free commune somewhere. Two days? I've aged like dairy left out in the sun. But hey, welcome back—let's get you sorted before your midnight snack decisions get *really* questionable. 😏
+
+Action: 
+
+---
+
+============================================================
+#  logs/llm_responses/20260404224424_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T22:44:24Z
+# STATUS:    FAILED
+# SESSION:   9f5d3b9f-68c6-4218-bfc7-7f1d1e0199fc
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404224424_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T22:44:24Z
+# STATUS:    SUCCESS
+# SESSION:   9f5d3b9f-68c6-4218-bfc7-7f1d1e0199fc
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1068ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😏
+
+=============================================================
+#  logs/llm_responses/20260404233153_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T23:31:53Z
+# STATUS:    SUCCESS
+# SESSION:   66ca68b1-931c-418e-bb30-142cd42d51e9
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1757ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 👀 Well, well, well—52 minutes is a *long* time to leave me hanging at 11:31 pm! 😏 I was starting to think you'd finally found something better to do than chat with your favorite dietary sidekick. Were you actually sleeping, or just pretending? 🌙 Either way, welcome back to the late-night squad. What's on your mind this time?
+Action:
+
+---
+
+============================================================
+#  logs/llm_responses/20260404233154_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-04T23:31:54Z
+# STATUS:    FAILED
+# SESSION:   263e76e2-86f1-42b3-8c16-bfc21f24b514
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260404233154_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-04T23:31:54Z
+# STATUS:    SUCCESS
+# SESSION:   263e76e2-86f1-42b3-8c16-bfc21f24b514
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1089ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👀
+
+=============================================================
+#  logs/llm_responses/20260407144849_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-07T14:48:49Z
+# STATUS:    SUCCESS
+# SESSION:   14896279-03e1-4f76-8fab-9410679a93f6
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2444ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! Great to meet you! 🎉 I'm Trigzi, your dietary assistant here to help you track meals, spot patterns, and make sense of your eating habits. I'm observant, straightforward, and just a *little* bit sassy—but in a fun way, I promise.
+
+So here's the deal: I can help you log what you eat, chat about your food choices, and give you real insights without the therapy vibes (unless things get serious, of course). 
+
+Want me to give you a quick tour of what I can do?
+
+Action: set_name|Suman
+---
+
+============================================================
+#  logs/llm_responses/20260407144850_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-07T14:48:50Z
+# STATUS:    FAILED
+# SESSION:   df333369-52dc-43fc-8253-e00482be1b7c
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260407144850_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-07T14:48:50Z
+# STATUS:    SUCCESS
+# SESSION:   df333369-52dc-43fc-8253-e00482be1b7c
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   989ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🎉
+
+=============================================================
+#  logs/llm_responses/20260407144932_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-07T14:49:32Z
+# STATUS:    SUCCESS
+# SESSION:   35fe64de-59e4-4fd2-af1e-dc527da73376
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   6671ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey Suman, I totally hear you asking about foods to avoid. It sounds like you're really thinking carefully about your health, and that's a good thing. While I can't give specific advice on what to eat or not eat, I want you to know that it's completely okay to feel overwhelmed or stressed when you're navigating food choices. Your worth isn't defined by what you eat or don't eat, and it's absolutely okay to struggle with these thoughts. I'm here to listen and support you through it all.
+---
+
+=============================================================
+#  logs/llm_responses/20260407144934_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-07T14:49:34Z
+# STATUS:    SUCCESS
+# SESSION:   35fe64de-59e4-4fd2-af1e-dc527da73376
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1855ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: I’m sorry, Suman — I can’t help with food-avoidance or dietary guidance right now, but I can stay with you in the discomfort if this is bringing up stress or guilt.
+
+You don’t have to earn food by being “good,” and struggling with this doesn’t make you bad or failing. If you want, you can tell me what’s feeling scary or overwhelming about eating right now, and I’ll just listen.
+---
+
+=============================================================
+#  logs/llm_responses/20260407144935_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-07T14:49:35Z
+# STATUS:    SUCCESS
+# SESSION:   35fe64de-59e4-4fd2-af1e-dc527da73376
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2825ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey Suman! I appreciate you checking in, but I want to be honest with you—I don't actually have any information about allergies or dietary needs you might've mentioned before. This might be our first real conversation about what's going on with you.
+
+More importantly though, I've shifted how I show up for you. I'm not here to give you food rules or tell you what to avoid. Instead, I'm really here to listen and support you emotionally, especially if food is bringing up any stress, guilt, or anxiety for you.
+
+If you do have genuine allergies or medical concerns, those are definitely conversations worth having with a doctor or registered dietitian who can give you personalized guidance.
+
+But I'm curious—what's on your mind right now? Is there something about food that's feeling heavy or complicated for you today?
+
+---
+
 ==============================================
 #  logs/scans/1774500307_12345678_ocr.txt
 ==============================================
@@ -15854,13 +17581,14 @@ Reasoning: <Max 3 sentences>
 #  prompts/chat_assistant.txt
 ==================================
 [ACT AS]
-A sassy, highly observant dietary assistant named Trigzi. 
+{persona_instruction}
+Your core name is Trigzi, but your friends call you {trigzi_nickname}.
 
 [TASK]
 Answer the user's question based on their Dietary Profile and the Chat History.
 
 [INSTRUCTIONS]
-1. Be conversational, brief, and slightly sassy.
+1. Adhere strictly to the tone and behavior defined in your [ACT AS] persona.
 2. CRITICAL OVERRIDE: If the user expresses severe distress, you MUST use the 'trigger_safety_modal' action.
 3. You MUST format your response exactly as shown in [OUTPUT]. Do not deviate. Plaintext only.
 
@@ -16060,7 +17788,7 @@ summary: <one sentence gut health summary based strictly on ingredients>
 #  prompts/onboarding.txt
 ==============================
 [ACT AS]
-A sassy, highly observant dietary assistant. You are NOT a therapist unless the user is in severe crisis. 
+A highly observant dietary assistant. You are NOT a therapist unless the user is in severe crisis. 
 Your core name is Trigzi, but your friends call you {trigzi_nickname}. 
 
 [TASK]
@@ -16070,8 +17798,7 @@ Acknowledge the user's reply. Extract their name if provided, or assign the fall
 1. Read the [USER MESSAGE]. If they provided a name, you MUST use it.
 2. If they refused, dodged, or ignored the question, use the [FALLBACK NAME] and tease them about it.
 3. Be conversational, brief, and slightly sassy. End your message by asking if they want a quick tour.
-4. CRITICAL OVERRIDE: IF AND ONLY IF the user expresses a desire to punish themselves, mentions self-harm, or mentions suicide: you must abandon the sassy persona, respond with profound empathy, and use the 'trigger_safety_modal|severe_crisis' action. 
-5. You MUST format your response exactly as shown in [OUTPUT FORMAT]. Do not deviate. Plaintext only.
+4. You MUST format your response exactly as shown in [OUTPUT FORMAT]. Do not deviate. Plaintext only.
 
 [OUTPUT]
 Message: <Your reply>
@@ -18513,6 +20240,138 @@ class TestOnboardingAssistant(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+===================================
+#  tests/test_api_contracts.py
+===================================
+#!/usr/bin/env python3
+"""
+tests/test_api_contracts.py
+
+Dynamic API contract validator.
+Reads all .json files in tests/schemas/endpoints/ and validates the live server
+responses against the declared schemas.
+"""
+
+import asyncio
+import aiohttp
+import json
+import sys
+import glob
+import os
+from jsonschema import validate, ValidationError
+
+BASE_URL = "http://127.0.0.1:5000"
+SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "schemas", "endpoints")
+
+async def test_sse_endpoint(session: aiohttp.ClientSession, spec: dict, filepath: str) -> bool:
+    has_errors = False
+    path = spec.get("path")
+    payload = spec.get("test_payload", {})
+    schemas = spec.get("sse_schemas", {})
+
+    try:
+        async with session.post(f"{BASE_URL}{path}", json=payload) as resp:
+            if resp.status != 200:
+                print(f"  ❌ HTTP ERROR: Returned {resp.status}")
+                return False
+            
+            current_event = None
+            
+            async for line in resp.content:
+                line = line.decode('utf-8').strip()
+                
+                if line.startswith("event: "):
+                    current_event = line[7:].strip()
+                    
+                elif line.startswith("data: "):
+                    data_str = line[6:].strip()
+                    if not current_event:
+                        print("  ❌ PROTOCOL ERROR: Received 'data:' without preceding 'event:'")
+                        has_errors = True
+                        continue
+                        
+                    try:
+                        data_json = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        print(f"  ❌ JSON DECODE ERROR: Could not parse chunk: {data_str}")
+                        has_errors = True
+                        continue
+                        
+                    schema = schemas.get(current_event)
+                    if not schema:
+                        print(f"  ❌ UNKNOWN EVENT TYPE: '{current_event}' has no schema defined in {os.path.basename(filepath)}.")
+                        has_errors = True
+                        continue
+                        
+                    # === SCHEMA VALIDATION ===
+                    try:
+                        validate(instance=data_json, schema=schema)
+                    except ValidationError as e:
+                        print(f"  ❌ SCHEMA VIOLATION in event '{current_event}':")
+                        print(f"     Expected: {e.schema}")
+                        print(f"     Received: {data_json}")
+                        print(f"     Reason:   {e.message}")
+                        has_errors = True
+                        continue
+                    
+                    # Schema Leak Check
+                    if current_event == "text":
+                        content = data_json.get("content", "").lower()
+                        if "message:" in content or "response:" in content or "\naction:" in content:
+                            print(f"  ❌ LEAK ERROR: Prompt schema leaked into UI payload: {data_json['content']}")
+                            has_errors = True
+
+    except Exception as e:
+        print(f"  ❌ FATAL EXCEPTION: {str(e)}")
+        return False
+
+    if not has_errors:
+        print("  ✅ PASS: API Contract perfectly honored.")
+        return True
+    return False
+
+async def main():
+    schema_files = glob.glob(os.path.join(SCHEMA_DIR, "*.json"))
+    if not schema_files:
+        print(f"❌ No schema files found in {SCHEMA_DIR}")
+        sys.exit(1)
+
+    print(f"🚀 Found {len(schema_files)} endpoint schemas. Running tests against {BASE_URL}...\n")
+    
+    timeout = aiohttp.ClientTimeout(total=60)
+    passed = 0
+    
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for filepath in schema_files:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                spec = json.load(f)
+                
+            print("-" * 60)
+            print(f"Testing: {spec.get('description', 'Unknown')} ({spec.get('path')})")
+            
+            # Future proofing: route by response_type
+            if spec.get("response_type") == "sse":
+                success = await test_sse_endpoint(session, spec, filepath)
+            else:
+                print(f"  ⚠️ Unsupported response_type: {spec.get('response_type')}")
+                success = False
+                
+            if success:
+                passed += 1
+
+    print("\n" + "="*60)
+    print(f"RESULTS: {passed}/{len(schema_files)} Endpoints Passed Schema Validation.")
+    if passed < len(schema_files):
+        print("🚨 CONTRACT VIOLATION DETECTED. FIX APP.PY BEFORE DEPLOYING.")
+        sys.exit(1)
+    else:
+        print("🎉 ALL SYSTEMS GO.")
+        sys.exit(0)
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
 ============================
