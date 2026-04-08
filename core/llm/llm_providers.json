@@ -186,6 +186,15 @@
         ],
         "optimize": "accuracy",
         "timeout": 10.0
+      },
+      "enrich_nutrition": {
+        "models": [
+          "claude-haiku-4-5-20251001",
+          "gemini-2.5-flash-lite",
+          "gpt-4.1-mini"
+        ],
+        "optimize": "failover",
+        "timeout": 15
       }
     }
 }

@@ -13,12 +13,52 @@ import json
 import sys
 import glob
 import os
+import unittest
 from jsonschema import validate, ValidationError
+
+class TestAPIContractsPlaceholder(unittest.TestCase):
+    def test_placeholder_for_pytest(self):
+        """Dummy test to prevent pytest from failing when it collects this file."""
+        self.assertTrue(True, "Loaded ok! Run this directly to hit the live server.")
 
 BASE_URL = "http://127.0.0.1:5000"
 SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "schemas", "endpoints")
 
-async def test_sse_endpoint(session: aiohttp.ClientSession, spec: dict, filepath: str) -> bool:
+# 🛡️ THE FIX: New validator for standard REST JSON endpoints
+async def validate_json_endpoint(session: aiohttp.ClientSession, spec: dict, filepath: str) -> bool:
+    path = spec.get("path")
+    payload = spec.get("test_payload", {})
+    schema = spec.get("response_schema", {})
+
+    try:
+        async with session.post(f"{BASE_URL}{path}", json=payload) as resp:
+            if resp.status != 200:
+                print(f"  ❌ HTTP ERROR: Returned {resp.status}")
+                return False
+            
+            try:
+                data_json = await resp.json()
+            except json.JSONDecodeError:
+                print(f"  ❌ JSON DECODE ERROR: Could not parse response body.")
+                return False
+
+            # === SCHEMA VALIDATION ===
+            try:
+                validate(instance=data_json, schema=schema)
+                print("  ✅ PASS: API Contract perfectly honored.")
+                return True
+            except ValidationError as e:
+                print(f"  ❌ SCHEMA VIOLATION:")
+                print(f"     Expected: {e.schema}")
+                print(f"     Received: {data_json}")
+                print(f"     Reason:   {e.message}")
+                return False
+
+    except Exception as e:
+        print(f"  ❌ FATAL EXCEPTION: {str(e)}")
+        return False
+
+async def validate_sse_endpoint(session: aiohttp.ClientSession, spec: dict, filepath: str) -> bool:
     has_errors = False
     path = spec.get("path")
     payload = spec.get("test_payload", {})
@@ -104,9 +144,11 @@ async def main():
             print("-" * 60)
             print(f"Testing: {spec.get('description', 'Unknown')} ({spec.get('path')})")
             
-            # Future proofing: route by response_type
-            if spec.get("response_type") == "sse":
-                success = await test_sse_endpoint(session, spec, filepath)
+            # 🛡️ THE FIX: Route the test based on the response type
+            if spec.get("response_type") == "json":
+                success = await validate_json_endpoint(session, spec, filepath)
+            elif spec.get("response_type") == "sse":
+                success = await validate_sse_endpoint(session, spec, filepath)
             else:
                 print(f"  ⚠️ Unsupported response_type: {spec.get('response_type')}")
                 success = False

@@ -1,0 +1,36 @@
+{
+  "description": "Nutrition OCR Enrichment",
+  "path": "/api/v1/enrich/nutrition",
+  "method": "POST",
+  "response_type": "json",
+  "test_payload": {
+    "gtin": "9310273001736",
+    "ocr_text": "ENERGY 1570kJ PROTEIN 5.6g FAT 17.3g CARBOHYDRATE 47.9g SUGARS 34.0g SODIUM 453mg"
+  },
+  "response_schema": {
+    "type": "object",
+    "properties": {
+      "energy_kj": { "type": ["number", "null"] },
+      "calories_kcal": { "type": ["number", "null"] },
+      "protein_g": { "type": ["number", "null"] },
+      "fat_total_g": { "type": ["number", "null"] },
+      "fat_saturated_g": { "type": ["number", "null"] },
+      "carbohydrates_g": { "type": ["number", "null"] },
+      "sugars_g": { "type": ["number", "null"] },
+      "fibre_g": { "type": ["number", "null"] },
+      "sodium_mg": { "type": ["number", "null"] }
+    },
+    "required": [
+      "energy_kj",
+      "calories_kcal",
+      "protein_g",
+      "fat_total_g",
+      "fat_saturated_g",
+      "carbohydrates_g",
+      "sugars_g",
+      "fibre_g",
+      "sodium_mg"
+    ],
+    "additionalProperties": false
+  }
+}

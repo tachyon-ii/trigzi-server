@@ -79,3 +79,8 @@ class SkillsLibrary:
             history=history,
             message=message
         )
+
+    @staticmethod
+    def enrich_nutrition_prompt(ocr_text: str) -> str:
+        template = SkillsLibrary._load_prompt('enrich_nutrition.txt')
+        return template.format(ocr_text=ocr_text)

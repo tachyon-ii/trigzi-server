@@ -348,6 +348,43 @@ async def chat_sigmund_endpoint():
         'Connection':        'keep-alive',
     })
 
+@app.route('/api/v1/enrich/nutrition', methods=['POST'])
+async def enrich_nutrition_route():
+    data = await request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid payload."}), 400
+
+    gtin = data.get('gtin', '').strip()
+    ocr_text = data.get('ocr_text', '').strip()
+
+    if not gtin or not ocr_text:
+        return jsonify({"error": "Missing gtin or ocr_text."}), 400
+
+    logger.info(f"Enrich nutrition requested for GTIN: {gtin}")
+    
+    # 1. Call LLM to parse OCR text
+    from core.analyser import enrich_nutrition
+    nutrition_data = await enrich_nutrition(gtin, ocr_text)
+    
+    if not nutrition_data:
+        logger.error(f"Nutrition extraction failed for GTIN: {gtin}")
+        return jsonify({"error": "Failed to parse nutrition data."}), 500
+
+    # 2. Patch the global database so the hole is permanently fixed
+    from utils.off_lookup import lookup
+    record = await lookup.get(gtin)
+    if record:
+        record["nutrition_100g"] = nutrition_data
+        
+        # Save it back to MariaDB. lookup.save handles preserving the existing enrichment_id
+        await lookup.save(record)
+        logger.info(f"Successfully patched nutrition data for GTIN: {gtin} in global database.")
+    else:
+        logger.warning(f"Could not find GTIN {gtin} in database to patch, returning payload to client anyway.")
+
+    # 3. Return the payload to the iOS client so it can update its local SwiftData cache
+    return jsonify(nutrition_data), 200
+
 if __name__ == '__main__':
     from hypercorn.config import Config
     from hypercorn.asyncio import serve

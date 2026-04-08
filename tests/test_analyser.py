@@ -227,15 +227,16 @@ class TestChatAssistant(unittest.IsolatedAsyncioTestCase):
             # THE SMOKING GUN: Passing a raw string instead of a dict
             malformed_context = "[ENVIRONMENTAL FACTS]\nuser_localtime: Australia/Sydney\n"
             
-            # Without the fix, this will throw: AttributeError: 'str' object has no attribute 'get'
-            result = await chat_assistant(
+            # 🛡️ THE FIX: Unpack the tuple (text, action)
+            text, action = await chat_assistant(
                 system_context=malformed_context, 
                 history=[], 
                 message="My name is James!"
             )
             
             # With the fix, it should gracefully wrap the string and return the payload
-            self.assertEqual(result, "Hello James!")
+            self.assertEqual(text, "Hello James!")
+            self.assertIsNone(action)
             
             # Verify the string was wrapped in a dictionary correctly before hitting the prompt builder
             payload = mock.call_args.kwargs["payload"]
@@ -247,9 +248,12 @@ class TestChatAssistant(unittest.IsolatedAsyncioTestCase):
         
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
             mock.side_effect = Exception("LLM Timeout")
-            result = await chat_assistant({"dietary_profile": "Vegan"}, [], "Hello")
             
-        self.assertIsNone(result)
+            # 🛡️ THE FIX: Unpack the tuple here as well
+            text, action = await chat_assistant({"dietary_profile": "Vegan"}, [], "Hello")
+            
+        self.assertIsNone(text)
+        self.assertIsNone(action)
 
 # ---------------------------------------------------------------------------
 # onboarding_assistant

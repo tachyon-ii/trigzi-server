@@ -139,6 +139,63 @@ async def analyse_menu(text: str) -> Optional[dict]:
         logger.error(f" analyse_menu failed: {e}")
         return None
 
+async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
+    """Extract missing nutrition data from an OCR panel using flat-text parsing."""
+    if not ocr_text:
+        return None
+
+    prompt = SkillsLibrary.enrich_nutrition_prompt(ocr_text)
+    
+    # Will fallback to standard routing defaults if not explicitly defined in llm_providers.json
+    _cfg = llm_config.task_config("enrich_nutrition") 
+
+    try:
+        response = await router.analyze(
+            payload       = {"prompt": prompt},
+            profile       = "", 
+            model_strings = _cfg["models"],
+            optimize      = _cfg["optimize"],
+            timeout       = _cfg["timeout"],
+        )
+        
+        raw_text = str(response.get("result", "")).strip()
+        
+        # The Dumb Parser: Convert flat key: value list into a dictionary
+        parsed = {}
+        for line in raw_text.split('\n'):
+            line = line.strip()
+            if not line or ':' not in line or line.startswith('#'): 
+                continue
+                
+            key, _, val = line.partition(':')
+            key = key.strip().lower()
+            val = val.strip()
+            
+            if val:
+                try:
+                    parsed[key] = float(val)
+                except ValueError:
+                    parsed[key] = None
+            else:
+                parsed[key] = None
+
+        # Return strictly mapped keys matching the iOS NutritionJSON schema
+        return {
+            "energy_kj": parsed.get("energy_kj"),
+            "calories_kcal": parsed.get("calories_kcal"),
+            "protein_g": parsed.get("protein_g"),
+            "fat_total_g": parsed.get("fat_total_g"),
+            "fat_saturated_g": parsed.get("fat_saturated_g"),
+            "carbohydrates_g": parsed.get("carbohydrates_g"),
+            "sugars_g": parsed.get("sugars_g"),
+            "fibre_g": parsed.get("fibre_g"),
+            "sodium_mg": parsed.get("sodium_mg")
+        }
+
+    except Exception as e:
+        logger.error(f" enrich_nutrition failed: {e}", exc_info=True)
+        return None
+
 # ---------------------------------------------------------------------------
 # Chat Pipeline (Pipelined for SSE Streaming)
 # ---------------------------------------------------------------------------

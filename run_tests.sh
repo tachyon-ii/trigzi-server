@@ -1,6 +1,6 @@
 #!/bin/bash
 # run_tests.sh
-# Runs the full test suite.
+# Runs the full test suite dynamically.
 # Run from the project root.
 
 set -e
@@ -24,38 +24,18 @@ fi
 echo "Running test suite..."
 echo ""
 
-echo "── gtin ────────────────────────────────────────────"
-python -m pytest tests/test_gtin.py -v
+# 🛡️ THE FIX: Dynamically glob all test files for segmented output
+for test_file in tests/test_*.py; do
+    # Extract filename without path and .py extension
+    filename=$(basename "$test_file" .py)
+    # Strip the "test_" prefix for the clean header name
+    module_name=${filename#test_}
+    
+    echo "── ${module_name} ────────────────────────────────────────"
+    python -m pytest "$test_file" -v --asyncio-mode=auto
+    echo ""
+done
 
-echo ""
-echo "── errors ──────────────────────────────────────────"
-python -m pytest tests/test_errors.py -v
-
-echo ""
-echo "── config ──────────────────────────────────────────"
-python -m pytest tests/test_config.py -v
-
-echo ""
-echo "── filters ─────────────────────────────────────────"
-python -m pytest tests/test_filters.py -v
-
-echo ""
-echo "── router ──────────────────────────────────────────"
-python -m pytest tests/test_router.py -v
-
-echo ""
-echo "── off_lookup ──────────────────────────────────────"
-python -m pytest tests/test_off_lookup.py -v
-
-echo ""
-echo "── analyser ────────────────────────────────────────"
-python -m pytest tests/test_analyser.py -v --asyncio-mode=auto
-
-echo ""
-echo "── enricher ────────────────────────────────────────"
-python -m pytest tests/test_enricher.py -v --asyncio-mode=auto
-
-echo ""
 echo "── full suite ──────────────────────────────────────"
 python -m pytest tests/ -v --tb=short --asyncio-mode=auto
 

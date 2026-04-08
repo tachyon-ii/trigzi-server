@@ -86,6 +86,12 @@ def get_task_payload_and_prompt(task, content):
         )
         return {"prompt": prompt}, prompt
 
+    elif task == "enrich_nutrition":
+        # The content is just the raw OCR text from the fixture file
+        prompt = SkillsLibrary.enrich_nutrition_prompt(ocr_text=content.strip())
+        # The payload format expects the {"prompt": ...} wrapper for the RequestFilters
+        return {"prompt": prompt}, prompt
+
     raise ValueError(f"Payload builder not implemented for task: '{task}'")
 
 async def execute_llm_request(model_name, payload):
