@@ -1,7 +1,6 @@
 # ==========================================
 # 1. Application Data & Caches
 # ==========================================
-# Do not commit the raw or normalized JSON databases
 /data/
 
 # ==========================================
@@ -24,12 +23,9 @@ __pycache__/
 # ==========================================
 # 4. OS & IDE Specific
 # ==========================================
-# Mac
 .DS_Store
 .AppleDouble
 .LSOverride
-
-# Editors
 .vscode/
 .idea/
 *.swp
@@ -39,7 +35,6 @@ __pycache__/
 # ==========================================
 *.log
 logs/
-clean_ingredient_frequencies.tsv.gz
 
 # ==========================================
 # 6. Data Files & Binaries
@@ -50,4 +45,3 @@ clean_ingredient_frequencies.tsv.gz
 *.jsonl.gz
 *.bin
 *.gz
-html/tarzan.txt.bin
