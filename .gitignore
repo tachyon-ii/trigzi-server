@@ -50,3 +50,4 @@ clean_ingredient_frequencies.tsv.gz
 *.jsonl.gz
 *.bin
 *.gz
+html/tarzan.txt.bin
