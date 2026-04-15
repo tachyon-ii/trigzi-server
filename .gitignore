@@ -39,3 +39,4 @@ __pycache__/
 # ==========================================
 *.log
 logs/
+clean_ingredient_frequencies.tsv.gz

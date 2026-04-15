@@ -15,6 +15,7 @@ from core.db import init_pool, close_pool
 from core.enricher import enrich
 from core.analyser import analyse_product, analyse_meal, analyse_menu, chat_assistant, chat_emoji, onboarding_assistant, sigmund_assistant
 from core.telemetry import telemetry_bp, log_ocr_scan, log_menu_scan
+from core.messages.messages_service import get_messages
 
 # --- BOMB-PROOF FILE LOGGING ---
 os.makedirs('/var/www/trigzi/logs', exist_ok=True)
@@ -384,6 +385,52 @@ async def enrich_nutrition_route():
 
     # 3. Return the payload to the iOS client so it can update its local SwiftData cache
     return jsonify(nutrition_data), 200
+
+@app.route('/api/v1/messages', methods=['GET'])
+async def messages_route():
+    """
+    GET /api/v1/messages
+ 
+    Upserts the device session, then returns today's single MOTD message
+    or [] if already delivered. Dedup is keyed on motd_last_date in MariaDB
+    — consistent across all Hypercorn workers.
+ 
+    Headers:
+        Authorization:  Bearer <token>   (required)
+        X-Device-ID:    <vendor UUID>    (required)
+        X-App-Version:  <build string>   (optional)
+ 
+    Query params:
+        since   (int)   Reserved for future server-push alerts.
+        context (str)   Filter by context, e.g. "motd".
+        force   (int)   1 = skip dedup. Testing only.
+    """
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "Unauthorized."}), 401
+ 
+    device_id = request.headers.get("X-Device-ID", "").strip()
+    if not device_id:
+        return jsonify({"error": "Missing X-Device-ID."}), 400
+ 
+    since_raw   = request.args.get("since")
+    since       = int(since_raw) if since_raw and since_raw.isdigit() else None
+    context     = request.args.get("context")
+    force       = request.args.get("force", "0") == "1"
+    ip          = request.remote_addr
+    app_version = request.headers.get("X-App-Version")
+ 
+    logger.info(f"Messages: device={device_id[:8]}… context={context} force={force}")
+ 
+    messages = await get_messages(
+        device_id   = device_id,
+        since       = since,
+        context     = context,
+        force       = force,
+        ip          = ip,
+        app_version = app_version,
+    )
+    return jsonify(messages), 200
 
 if __name__ == '__main__':
     from hypercorn.config import Config

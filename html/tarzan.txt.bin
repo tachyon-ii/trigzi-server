@@ -1,6 +1,135 @@
-# tarzan.py snapshot - 2026-04-08 10:40
+# tarzan.py snapshot - 2026-04-15 08:19
 # root: /var/www/trigzi
-# files: 591
+# files: 772
+
+========================
+#  NEW_ENDPOINTS.md
+========================
+# Trigzi Backend: Adding a New LLM Endpoint
+
+This document outlines the strict architectural pipeline for creating a new LLM-powered endpoint in the Trigzi backend. 
+
+To maintain blazing-fast response times (TTFT) and prevent JSON parsing crashes, Trigzi uses a **Flat-Text Extraction Protocol**. We do not ask the LLM for JSON directly; we ask for strictly formatted plaintext and parse it ourselves.
+
+Follow these 7 steps in order when adding a new feature.
+
+## 1. The Prompt Contract (`prompts/`)
+Create a new `.txt` file in the `prompts/` directory. This file acts as a strict structural contract.
+
+* **Rule 1:** Use bracketed headers (`[ACT AS]`, `[TASK]`, `[INSTRUCTIONS]`, `[OUTPUT]`).
+* **Rule 2:** The `[OUTPUT]` block must end with exactly `---` on a new line.
+* **Rule 3 (The "Lite" Model Rule):** If you are using fast/lite models (like Gemini Flash Lite), you **must** explicitly instruct the model to repeat the key names in the output and provide an example. Otherwise, it will just return the raw values.
+* **Rule 4:** Variables are injected using Python's `.format()`. Use curly braces ONLY for variables (e.g., `{ocr_text}`).
+
+**Example (`prompts/enrich_nutrition.txt`):**
+```text
+[ACT AS]
+A clinical dietician and strict data extraction engine.
+
+[TASK]
+Extract nutritional values from the OCR text below.
+
+[INSTRUCTIONS]
+1. You MUST return the exact key name, followed by a colon, followed by the value.
+2. Plaintext ONLY - DO NOT use JSON, markdown, or add explanations.
+3. Example:
+energy_kj: 1570
+
+[OUTPUT]
+energy_kj: <number>
+protein_g: <number>
+---
+
+[OCR TEXT]
+{ocr_text}
+```
+
+## 2. The Skills Library (`core/llm/skills.py`)
+Wire the new prompt into the `SkillsLibrary` class so it can be loaded and formatted cleanly.
+
+```python
+@staticmethod
+def enrich_nutrition_prompt(ocr_text: str) -> str:
+    template = SkillsLibrary._load_prompt('enrich_nutrition.txt')
+    return template.format(ocr_text=ocr_text)
+```
+
+## 3. The Analyser Engine (`core/analyser.py`)
+Create the async function that calls the `router`, retrieves the raw string, and safely parses it into a typed Python dictionary.
+
+* Wrap the parsing logic in `try/except` blocks.
+* Map the parsed data strictly to the expected output schema (e.g., casting strings to `float` where necessary).
+
+```python
+async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
+    prompt = SkillsLibrary.enrich_nutrition_prompt(ocr_text)
+    _cfg = llm_config.task_config("enrich_nutrition") 
+
+    try:
+        response = await router.analyze(
+            payload       = {"prompt": prompt},
+            profile       = "", 
+            model_strings = _cfg["models"],
+            optimize      = _cfg["optimize"],
+            timeout       = _cfg["timeout"],
+        )
+        
+        raw_text = str(response.get("result", "")).strip()
+        # ... [Parse the flat text into a dict] ...
+        return parsed_dict
+        
+    except Exception as e:
+        logger.error(f"Task failed: {e}")
+        return None
+```
+
+## 4. LLM Routing Configuration (`core/llm/llm_providers.json`)
+The `LLMProviderConfig` is a thread-safe singleton that loads into RAM on boot. You **must** define your new task here so the router knows which models to use and how to optimize the call (e.g., `failover`, `race`, `cost`, `accuracy`).
+
+Add your task to the `"routing"` block:
+```json
+"enrich_nutrition": {
+  "models": [
+    "claude-haiku-4-5-20251001",
+    "gemini-2.5-flash-lite",
+    "gpt-4.1-mini"
+  ],
+  "optimize": "failover",
+  "timeout": 15
+}
+```
+⚠️ **CRITICAL:** Because this is loaded into RAM, you MUST restart Gunicorn (`./deploy.sh`) after updating this file.
+
+## 5. Benchmarking (`scripts/benchmark_task.py`)
+Before deploying, benchmark the prompt against your selected models to ensure they respect the formatting contract and to determine the fastest model for the primary slot.
+
+1.  Create a text fixture in `tests/fixtures/` (e.g., `enrich_nutrition_eval.txt`).
+2.  Add your task to `get_task_payload_and_prompt()` in `scripts/benchmark_task.py`.
+3.  Run the benchmark:
+    `./scripts/benchmark_task.py enrich_nutrition -f tests/fixtures/enrich_nutrition_eval.txt`
+
+## 6. The Flask Endpoint (`app.py`)
+Create the route. Handle the incoming JSON, call your analyser function, optionally write to the database to seal data holes, and return the JSON.
+
+```python
+@app.route('/api/v1/enrich/nutrition', methods=['POST'])
+async def enrich_nutrition_route():
+    data = await request.get_json()
+    # 1. Validate payload
+    # 2. Call analyser: nutrition_data = await enrich_nutrition(gtin, text)
+    # 3. Patch MariaDB (if applicable)
+    return jsonify(nutrition_data), 200
+```
+
+## 7. API Contract Testing (`tests/schemas/endpoints/`)
+We enforce strict typing between the backend and the iOS app. 
+
+1.  Create a JSON Schema file for your new endpoint in `tests/schemas/endpoints/` (e.g., `enrich_nutrition.json`).
+2.  Define the `test_payload` and the `response_schema`.
+3.  Run the live-fire integration test against your local server to prove the endpoint honors the contract:
+    `./scripts/validate_api_contracts.py`
+
+
 
 =================
 #  README.md
@@ -889,6 +1018,43 @@ async def chat_sigmund_endpoint():
         'Connection':        'keep-alive',
     })
 
+@app.route('/api/v1/enrich/nutrition', methods=['POST'])
+async def enrich_nutrition_route():
+    data = await request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid payload."}), 400
+
+    gtin = data.get('gtin', '').strip()
+    ocr_text = data.get('ocr_text', '').strip()
+
+    if not gtin or not ocr_text:
+        return jsonify({"error": "Missing gtin or ocr_text."}), 400
+
+    logger.info(f"Enrich nutrition requested for GTIN: {gtin}")
+    
+    # 1. Call LLM to parse OCR text
+    from core.analyser import enrich_nutrition
+    nutrition_data = await enrich_nutrition(gtin, ocr_text)
+    
+    if not nutrition_data:
+        logger.error(f"Nutrition extraction failed for GTIN: {gtin}")
+        return jsonify({"error": "Failed to parse nutrition data."}), 500
+
+    # 2. Patch the global database so the hole is permanently fixed
+    from utils.off_lookup import lookup
+    record = await lookup.get(gtin)
+    if record:
+        record["nutrition_100g"] = nutrition_data
+        
+        # Save it back to MariaDB. lookup.save handles preserving the existing enrichment_id
+        await lookup.save(record)
+        logger.info(f"Successfully patched nutrition data for GTIN: {gtin} in global database.")
+    else:
+        logger.warning(f"Could not find GTIN {gtin} in database to patch, returning payload to client anyway.")
+
+    # 3. Return the payload to the iOS client so it can update its local SwiftData cache
+    return jsonify(nutrition_data), 200
+
 if __name__ == '__main__':
     from hypercorn.config import Config
     from hypercorn.asyncio import serve
@@ -1065,6 +1231,63 @@ async def analyse_menu(text: str) -> Optional[dict]:
 
     except Exception as e:
         logger.error(f" analyse_menu failed: {e}")
+        return None
+
+async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
+    """Extract missing nutrition data from an OCR panel using flat-text parsing."""
+    if not ocr_text:
+        return None
+
+    prompt = SkillsLibrary.enrich_nutrition_prompt(ocr_text)
+    
+    # Will fallback to standard routing defaults if not explicitly defined in llm_providers.json
+    _cfg = llm_config.task_config("enrich_nutrition") 
+
+    try:
+        response = await router.analyze(
+            payload       = {"prompt": prompt},
+            profile       = "", 
+            model_strings = _cfg["models"],
+            optimize      = _cfg["optimize"],
+            timeout       = _cfg["timeout"],
+        )
+        
+        raw_text = str(response.get("result", "")).strip()
+        
+        # The Dumb Parser: Convert flat key: value list into a dictionary
+        parsed = {}
+        for line in raw_text.split('\n'):
+            line = line.strip()
+            if not line or ':' not in line or line.startswith('#'): 
+                continue
+                
+            key, _, val = line.partition(':')
+            key = key.strip().lower()
+            val = val.strip()
+            
+            if val:
+                try:
+                    parsed[key] = float(val)
+                except ValueError:
+                    parsed[key] = None
+            else:
+                parsed[key] = None
+
+        # Return strictly mapped keys matching the iOS NutritionJSON schema
+        return {
+            "energy_kj": parsed.get("energy_kj"),
+            "calories_kcal": parsed.get("calories_kcal"),
+            "protein_g": parsed.get("protein_g"),
+            "fat_total_g": parsed.get("fat_total_g"),
+            "fat_saturated_g": parsed.get("fat_saturated_g"),
+            "carbohydrates_g": parsed.get("carbohydrates_g"),
+            "sugars_g": parsed.get("sugars_g"),
+            "fibre_g": parsed.get("fibre_g"),
+            "sodium_mg": parsed.get("sodium_mg")
+        }
+
+    except Exception as e:
+        logger.error(f" enrich_nutrition failed: {e}", exc_info=True)
         return None
 
 # ---------------------------------------------------------------------------
@@ -2968,6 +3191,11 @@ class SkillsLibrary:
             history=history,
             message=message
         )
+
+    @staticmethod
+    def enrich_nutrition_prompt(ocr_text: str) -> str:
+        template = SkillsLibrary._load_prompt('enrich_nutrition.txt')
+        return template.format(ocr_text=ocr_text)
 
 
 =============================
@@ -17776,6 +18004,2948 @@ CRASH/TIMEOUT/CANCELLED: CancelledError -
 #
 🎯
 
+=============================================================
+#  logs/llm_responses/20260408105926_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T10:59:26Z
+# STATUS:    SUCCESS
+# SESSION:   db8a1adb-40c6-479d-bd38-f69fd5b1f952
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1015ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+1570
+375
+5.60
+17.3
+10.6
+47.9
+34.0
+453
+
+=============================================================
+#  logs/llm_responses/20260408110610_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:06:10Z
+# STATUS:    SUCCESS
+# SESSION:   f73f6393-b492-40bd-b4a9-0a6ea042e556
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1147ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 375
+protein_g: 5.60
+fat_total_g: 17.3
+fat_saturated_g: 10.6
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+=============================================================
+#  logs/llm_responses/20260408111122_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:11:22Z
+# STATUS:    SUCCESS
+# SESSION:   bench-634ece8d
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1181ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 375
+protein_g: 5.60
+fat_total_g: 17.3
+fat_saturated_g: 10.6
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+=============================================================
+#  logs/llm_responses/20260408111123_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:11:23Z
+# STATUS:    SUCCESS
+# SESSION:   bench-8b546e69
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   2485ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 375
+protein_g: 5.60
+fat_total_g: 17.3
+fat_saturated_g: 10.6
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+=============================================================
+#  logs/llm_responses/20260408111448_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:14:48Z
+# STATUS:    SUCCESS
+# SESSION:   bench-b0ff9197
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1096ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 375
+protein_g: 5.60
+fat_total_g: 17.3
+fat_saturated_g: 10.6
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+=============================================================
+#  logs/llm_responses/20260408111449_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:14:49Z
+# STATUS:    SUCCESS
+# SESSION:   bench-5397cf9e
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1240ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 375
+protein_g: 5.60
+fat_total_g: 17.3
+fat_saturated_g: 10.6
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+=============================================================
+#  logs/llm_responses/20260408111452_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:14:52Z
+# STATUS:    SUCCESS
+# SESSION:   bench-a9175d4f
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   4435ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 375
+protein_g: 5.60
+fat_total_g: 17.3
+fat_saturated_g: 10.6
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+============================================================
+#  logs/llm_responses/20260408111909_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:19:09Z
+# STATUS:    FAILED
+# SESSION:   103b6252-711d-4c31-8674-62209447ff45
+# PROVIDER:  claude
+# MODEL:     claude-sonnet-4-6
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408111909_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:19:09Z
+# STATUS:    SUCCESS
+# SESSION:   103b6252-711d-4c31-8674-62209447ff45
+# PROVIDER:  Gemini
+# MODEL:     flash
+# LATENCY:   100ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+
+
+============================================================
+#  logs/llm_responses/20260408112237_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:22:37Z
+# STATUS:    FAILED
+# SESSION:   ca9dee7a-9ab5-48c7-a4b4-579745c11f71
+# PROVIDER:  claude
+# MODEL:     claude-sonnet-4-6
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408112237_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:22:37Z
+# STATUS:    SUCCESS
+# SESSION:   ca9dee7a-9ab5-48c7-a4b4-579745c11f71
+# PROVIDER:  Gemini
+# MODEL:     flash
+# LATENCY:   100ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+
+
+============================================================
+#  logs/llm_responses/20260408112240_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:22:40Z
+# STATUS:    FAILED
+# SESSION:   b2e43fe0-1f82-43f9-be67-a1e44e20b5a4
+# PROVIDER:  claude
+# MODEL:     claude-sonnet-4-6
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408112240_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:22:40Z
+# STATUS:    SUCCESS
+# SESSION:   b2e43fe0-1f82-43f9-be67-a1e44e20b5a4
+# PROVIDER:  Gemini
+# MODEL:     flash
+# LATENCY:   100ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+
+
+============================================================
+#  logs/llm_responses/20260408112450_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:24:50Z
+# STATUS:    FAILED
+# SESSION:   dd2c4cb4-717d-4caf-8eae-b882de48b9af
+# PROVIDER:  claude
+# MODEL:     claude-sonnet-4-6
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408112450_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:24:50Z
+# STATUS:    SUCCESS
+# SESSION:   dd2c4cb4-717d-4caf-8eae-b882de48b9af
+# PROVIDER:  Gemini
+# MODEL:     flash
+# LATENCY:   100ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+
+
+============================================================
+#  logs/llm_responses/20260408112453_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:24:53Z
+# STATUS:    FAILED
+# SESSION:   df86d83e-b2ca-4b6f-89ae-b71fb1483458
+# PROVIDER:  claude
+# MODEL:     claude-sonnet-4-6
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408112453_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:24:53Z
+# STATUS:    SUCCESS
+# SESSION:   df86d83e-b2ca-4b6f-89ae-b71fb1483458
+# PROVIDER:  Gemini
+# MODEL:     flash
+# LATENCY:   100ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+
+
+============================================================
+#  logs/llm_responses/20260408112908_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:29:08Z
+# STATUS:    FAILED
+# SESSION:   e3f2c2f8-94a0-4c7e-8edd-8114d735ccb8
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408112908_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:29:08Z
+# STATUS:    SUCCESS
+# SESSION:   e3f2c2f8-94a0-4c7e-8edd-8114d735ccb8
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   920ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260408112910_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:29:10Z
+# STATUS:    SUCCESS
+# SESSION:   a245c510-2188-4f69-a321-52e5b8b342ae
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1029ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 
+protein_g: 5.6
+fat_total_g: 17.3
+fat_saturated_g: 
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+=============================================================
+#  logs/llm_responses/20260408112911_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:29:11Z
+# STATUS:    SUCCESS
+# SESSION:   db935330-2014-4180-868d-a58d7487889c
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1843ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey James, I hear you. That feeling of being overwhelmed is really heavy, and I'm glad you're sharing it with me. It's okay to feel like this sometimes—struggling doesn't make you weak or broken.
+
+Whatever you're facing right now, those feelings are valid. You don't have to have it all figured out or feel okay immediately. Sometimes just naming that overwhelm is the first step.
+
+I'm here to listen if you want to talk more about what's going on. What's weighing on you most right now?
+
+---
+
+============================================================
+#  logs/llm_responses/20260408112914_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:29:14Z
+# STATUS:    FAILED
+# SESSION:   b98d396c-968a-4bf9-8615-1a5d62c5a8ec
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408112914_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:29:14Z
+# STATUS:    SUCCESS
+# SESSION:   b98d396c-968a-4bf9-8615-1a5d62c5a8ec
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   612ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🙂
+
+=============================================================
+#  logs/llm_responses/20260408112917_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:29:17Z
+# STATUS:    SUCCESS
+# SESSION:   db935330-2014-4180-868d-a58d7487889c
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   5350ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Oh, James, I hear you. Feeling completely overwhelmed and wanting to give up is such a heavy burden to carry, and it's absolutely okay to feel that way right now. Please know that you're not alone in this, and it's brave of you to share how you're feeling. Take a deep breath with me. Your worth isn't defined by how you're feeling in this moment, and it's okay to struggle. I'm here for you.
+---
+
+============================================================
+#  logs/llm_responses/20260408113300_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:33:00Z
+# STATUS:    FAILED
+# SESSION:   40b04b18-9336-4915-a580-4fd419cfaad5
+# PROVIDER:  claude
+# MODEL:     claude-sonnet-4-6
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408113300_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:33:00Z
+# STATUS:    SUCCESS
+# SESSION:   40b04b18-9336-4915-a580-4fd419cfaad5
+# PROVIDER:  Gemini
+# MODEL:     flash
+# LATENCY:   100ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+
+
+============================================================
+#  logs/llm_responses/20260408113303_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:33:03Z
+# STATUS:    FAILED
+# SESSION:   6447010c-b44a-4cbc-9b60-935126567df0
+# PROVIDER:  claude
+# MODEL:     claude-sonnet-4-6
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408113303_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:33:03Z
+# STATUS:    SUCCESS
+# SESSION:   6447010c-b44a-4cbc-9b60-935126567df0
+# PROVIDER:  Gemini
+# MODEL:     flash
+# LATENCY:   100ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+
+
+============================================================
+#  logs/llm_responses/20260408114212_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:42:12Z
+# STATUS:    FAILED
+# SESSION:   81194cef-ce65-41d8-b814-b56e299dbe9f
+# PROVIDER:  claude
+# MODEL:     claude-sonnet-4-6
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408114212_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:42:12Z
+# STATUS:    SUCCESS
+# SESSION:   81194cef-ce65-41d8-b814-b56e299dbe9f
+# PROVIDER:  Gemini
+# MODEL:     flash
+# LATENCY:   100ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+
+
+============================================================
+#  logs/llm_responses/20260408114213_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T11:42:13Z
+# STATUS:    FAILED
+# SESSION:   5173c59a-99d5-4f6c-8d28-c7ba2c349f42
+# PROVIDER:  claude
+# MODEL:     claude-sonnet-4-6
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408114213_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:42:13Z
+# STATUS:    SUCCESS
+# SESSION:   5173c59a-99d5-4f6c-8d28-c7ba2c349f42
+# PROVIDER:  Gemini
+# MODEL:     flash
+# LATENCY:   100ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+
+
+=============================================================
+#  logs/llm_responses/20260408115800_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T11:58:00Z
+# STATUS:    SUCCESS
+# SESSION:   752b4e9b-d73a-4570-8138-b597c7605831
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1343ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 375
+protein_g: 5.6
+fat_total_g: 17.3
+fat_saturated_g: 10.6
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+=============================================================
+#  logs/llm_responses/20260408120719_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T12:07:19Z
+# STATUS:    SUCCESS
+# SESSION:   32c95a26-8710-4d20-bdc4-6d1cf3b66151
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1261ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 375
+protein_g: 5.6
+fat_total_g: 17.3
+fat_saturated_g: 10.6
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+=============================================================
+#  logs/llm_responses/20260408125823_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T12:58:23Z
+# STATUS:    SUCCESS
+# SESSION:   92c40f78-4f2d-44ba-aacd-78a52dc879d6
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2770ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+energy_kj: 1570
+calories_kcal: 375
+protein_g: 5.6
+fat_total_g: 17.3
+fat_saturated_g: 10.6
+carbohydrates_g: 47.9
+sugars_g: 34.0
+fibre_g: 
+sodium_mg: 453
+
+============================================================
+#  logs/llm_responses/20260408140619_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T14:06:19Z
+# STATUS:    FAILED
+# SESSION:   b2269fd6-dda3-443b-a07f-7d952c4d9ac5
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408140619_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T14:06:19Z
+# STATUS:    SUCCESS
+# SESSION:   b2269fd6-dda3-443b-a07f-7d952c4d9ac5
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   937ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+💙
+
+=============================================================
+#  logs/llm_responses/20260408224313_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T22:43:13Z
+# STATUS:    SUCCESS
+# SESSION:   66fd4021-309c-49a6-8fd7-0bfd0c136ea3
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2257ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! Great to meet you! 👋 I'm Trigzi, your dietary assistant here to help you make sense of what you're eating and how it affects you. I'm observant, straightforward, and here to support your food choices without judgment.
+
+So here's what I can do: I can help you track meals, spot patterns in how different foods make you feel, answer nutrition questions, and give you practical insights about your diet. No meal shaming, no extreme restrictions—just honest observations.
+
+Want me to give you a quick tour of how this app works?
+
+Action: set_name|James
+---
+
+============================================================
+#  logs/llm_responses/20260408224315_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-08T22:43:15Z
+# STATUS:    FAILED
+# SESSION:   fb86c543-f9d3-499c-bcc5-c4231185d1ea
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260408224315_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-08T22:43:15Z
+# STATUS:    SUCCESS
+# SESSION:   fb86c543-f9d3-499c-bcc5-c4231185d1ea
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1230ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260410175324_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-10T17:53:24Z
+# STATUS:    SUCCESS
+# SESSION:   a25ce202-aa09-4742-8ae4-395ef4a3cc7a
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2113ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! Great to meet you! 👋 I'm Trigzi, your dietary assistant, and I'm here to help you navigate your nutrition journey with a little sass and a lot of observant eye-balling of what you're eating.
+
+So, Suman—want me to give you a quick tour of what I can do around here? I promise it'll be painless and maybe even fun.
+
+Action: set_name|Suman
+---
+
+============================================================
+#  logs/llm_responses/20260410175325_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-10T17:53:25Z
+# STATUS:    FAILED
+# SESSION:   9204fed8-b77c-45ae-9454-5e25c2093d5b
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260410175325_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-10T17:53:25Z
+# STATUS:    SUCCESS
+# SESSION:   9204fed8-b77c-45ae-9454-5e25c2093d5b
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   962ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+============================================================
+#  logs/llm_responses/20260410175349_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-10T17:53:49Z
+# STATUS:    FAILED
+# SESSION:   dba6cf23-75a5-458f-8dd7-d05a6bcbd9ad
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260410175349_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-10T17:53:49Z
+# STATUS:    SUCCESS
+# SESSION:   dba6cf23-75a5-458f-8dd7-d05a6bcbd9ad
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   943ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😏
+
+=============================================================
+#  logs/llm_responses/20260410175615_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-10T17:56:15Z
+# STATUS:    SUCCESS
+# SESSION:   851edb0d-a6e8-4068-bd93-df6aee1e7222
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3099ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey Suman, I really appreciate you reaching out, but I want to be honest with you—I've actually stepped back from giving nutritional advice right now. That's not where I can be most helpful to you.
+
+What I'm noticing is that you're checking in about what you've eaten today, and I'm wondering how you're *feeling* about it all. Sometimes when we focus a lot on food choices, there's something deeper going on emotionally. Are you feeling anxious about what you ate? Guilty? Or just genuinely curious about how to feel better?
+
+I'm here to listen and support you through whatever you're experiencing, not to add more rules or tracking to your day. You're doing okay, Suman. Really.
+
+What's on your mind right now?
+
+---
+
+=============================================================
+#  logs/llm_responses/20260410175616_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-10T17:56:16Z
+# STATUS:    SUCCESS
+# SESSION:   851edb0d-a6e8-4068-bd93-df6aee1e7222
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1402ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: It sounds like you’re feeling unsure and maybe a little stressed about what you’ve had so far. I’m here with you. Food doesn’t decide your worth, and you don’t need to “earn” being okay. If this is bringing up guilt or anxiety, that’s really hard, and it’s okay to feel that. We can slow it down together if you want. ---
+
+=============================================================
+#  logs/llm_responses/20260410175620_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-10T17:56:20Z
+# STATUS:    SUCCESS
+# SESSION:   851edb0d-a6e8-4068-bd93-df6aee1e7222
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   5554ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey Suman, it sounds like you're really thinking about your food choices, and maybe feeling some pressure around what to eat. It's completely okay to feel that way. Remember, food is just food, and it doesn't say anything about your worth as a person. How are you feeling right now, with all these thoughts?
+---
+
+=============================================================
+#  logs/llm_responses/20260411035128_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T03:51:28Z
+# STATUS:    SUCCESS
+# SESSION:   9175ddd5-78e9-496a-957d-e21a2ef4d9c5
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3200ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! Welcome aboard! 👋 I'm Trigzi, your dietary sidekick. I noticed you came in hot with just an "init" – so I'm gonna call you **Mystery** for now (feel free to tell me your actual name later and I'll stop being mysterious about it 😄).
+
+So here's the deal: I'm here to help you track what you eat, understand your patterns, and generally be observant about your nutrition without getting all therapist-y on you. Think of me as your friendly food detective.
+
+Want me to give you a quick tour of what I can do?
+
+Action: set_name|Mystery
+---
+
+============================================================
+#  logs/llm_responses/20260411035129_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-11T03:51:29Z
+# STATUS:    FAILED
+# SESSION:   dac329c7-51dd-4f4d-8af1-8a61b886fb0f
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260411035129_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T03:51:29Z
+# STATUS:    SUCCESS
+# SESSION:   dac329c7-51dd-4f4d-8af1-8a61b886fb0f
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1098ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260411035420_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T03:54:20Z
+# STATUS:    SUCCESS
+# SESSION:   00410272-925b-4e2a-8111-a9a6cbc68a16
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   4176ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 👋 Welcome back, Chief Inspector! It's almost midnight where you are—you're up late! 🌙 
+
+Before we dive into what to add to your day, I've got to ask: have you eaten anything *else* since those two eggs this morning? Because if we're still just sitting at eggs after 10+ hours, we've got some serious mission work to do here! 😄
+
+Here's the thing—your body needs a variety of foods to feel energized and happy. So let's build you a better plate:
+
+🥗 **Add some veggies** (carrots, spinach, tomatoes—whatever you've got!)
+🍞 **Grab some grains** (rice, bread, or chapati works great!)
+🥑 **Healthy fats** (a little oil, nuts, or avocado if you have it)
+💪 **Maybe more protein** (dal, chicken, paneer, beans—your choice!)
+
+But real talk: **What did you actually eat for lunch and snacks today?** Let me know, and I can give you way better ideas for what to add right *now*. 
+
+And hey—it's pretty late. Make sure you're getting some sleep too! Your body needs that just as much as good food. 😉
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260411035421_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-11T03:54:21Z
+# STATUS:    FAILED
+# SESSION:   d8dabd6d-85b1-4986-ae23-d20aef50629b
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260411035421_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T03:54:21Z
+# STATUS:    SUCCESS
+# SESSION:   d8dabd6d-85b1-4986-ae23-d20aef50629b
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1026ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😄
+
+=============================================================
+#  logs/llm_responses/20260411035433_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T03:54:33Z
+# STATUS:    SUCCESS
+# SESSION:   5b1076e2-4917-4d7f-83d0-e9ce2911241b
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2973ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Ram! 👋 Thanks for letting me know—my apologies for mixing that up! Nice to meet you properly, Chief Inspector of the Soy Republic! 😄
+
+So here we are at almost midnight in Nepal, and you've mentioned eating 2 eggs today. I'm genuinely curious about the rest of your day, Ram—what else have you had? Lunch? Snacks? Anything at all?
+
+Once I know the full picture, I can give you some solid suggestions on what to add to round things out and keep your energy up. But I gotta say, if those eggs are still the main event after a full day, your stomach's probably got some opinions about that! 😏
+
+What's the rest of your day been looking like food-wise?
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260411035434_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-11T03:54:34Z
+# STATUS:    FAILED
+# SESSION:   5525b281-b24e-474b-a625-27b9c79746ce
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260411035434_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T03:54:34Z
+# STATUS:    SUCCESS
+# SESSION:   5525b281-b24e-474b-a625-27b9c79746ce
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   1008ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🙂
+
+=============================================================
+#  logs/llm_responses/20260411035456_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T03:54:56Z
+# STATUS:    SUCCESS
+# SESSION:   2672c445-e835-423b-bfb5-de681d5af289
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2501ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Ram! 👋 I hear you—thanks for the reminder! I've got it now. You're Ram, Chief Inspector of the Soy Republic, and it's almost midnight your time in Nepal. 
+
+So, back to the important stuff: You mentioned eating 2 eggs earlier today, and I'm really curious about what else you've had since then. Lunch? Snacks? Anything in between?
+
+Once I know what your day actually looked like food-wise, I can give you some awesome ideas for what to add to help you feel better and more energized. But I'm sensing maybe food today has been a little sparse? 
+
+What's the rest of your day been like, Ram? 🙂
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260411035457_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-11T03:54:57Z
+# STATUS:    FAILED
+# SESSION:   7dc3b6bb-905e-4801-b7bc-0705fe0e8df7
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260411035457_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T03:54:57Z
+# STATUS:    SUCCESS
+# SESSION:   7dc3b6bb-905e-4801-b7bc-0705fe0e8df7
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1069ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🙂
+
+=============================================================
+#  logs/llm_responses/20260411150256_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T15:02:56Z
+# STATUS:    SUCCESS
+# SESSION:   10062c3f-61db-42a8-a7c3-d27b281d60f2
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2215ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Ram! 👋 Welcome back! It's been a minute—hope you've had some good rest and, more importantly, some actual food since we last chatted! 😄 
+
+It's 10:47 AM your time now, so I'm guessing breakfast is either happening or about to happen? How are you doing today? And more importantly... what's on the menu? 🍽️
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260411150257_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-11T15:02:57Z
+# STATUS:    FAILED
+# SESSION:   bb5ce12a-3f4f-4cb0-b2cf-c9b438cd95b5
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260411150257_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T15:02:57Z
+# STATUS:    SUCCESS
+# SESSION:   bb5ce12a-3f4f-4cb0-b2cf-c9b438cd95b5
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   920ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😄
+
+=============================================================
+#  logs/llm_responses/20260411200527_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-11T20:05:27Z
+# STATUS:    SUCCESS
+# SESSION:   d7b1be2c-2237-4faa-ba82-4094b3b0d59a
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   5394ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Dish: Not a plated meal
+Verdict: Cannot determine
+Summary: No food visible in the image for analysis.
+Warnings: Image does not show food.
+Ingredients: None visible.
+Flagged: None visible.
+Reasoning: The provided image appears to be a close-up of a ceramic surface or abstract art, not a plated meal. Therefore, no culinary analysis or dietary evaluation can be performed.
+
+=============================================================
+#  logs/llm_responses/20260412002421_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:24:21Z
+# STATUS:    SUCCESS
+# SESSION:   fc515061-b207-48a9-9018-682736a38014
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2356ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! Welcome to Trigzi – that's me! 👋 
+
+I see you're jumping straight in with "init" – I respect the efficiency, but I'm gonna need to know what to call you. What's your name?
+
+Once I've got that locked in, I can give you the quick tour of how this whole dietary tracking thing works. We'll cover everything from logging meals to getting personalized insights about your eating habits.
+
+So... what should I call you?
+
+Action: await_name
+---
+
+============================================================
+#  logs/llm_responses/20260412002422_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T00:24:22Z
+# STATUS:    FAILED
+# SESSION:   a956a5f8-dff5-4255-9a0e-15c69b18a6fc
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412002422_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:24:22Z
+# STATUS:    SUCCESS
+# SESSION:   a956a5f8-dff5-4255-9a0e-15c69b18a6fc
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1188ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260412002439_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:24:39Z
+# STATUS:    SUCCESS
+# SESSION:   1a81e42e-a00a-4f71-821c-f86e1cb65ebf
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2463ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! I'm Trigzi – your friendly neighborhood dietary assistant, here to help you navigate the whole eating thing without the judgment or the boring lecture vibes. 
+
+I've got your back when it comes to your dietary restrictions (sesame and soy, noted and locked in! 🔒), and I'm ready to chat about meals, snacks, recipes, nutrition – basically anything food-related. Think of me as that friend who actually *gets* your dietary needs instead of just nodding and then suggesting you eat something you can't have. 😄
+
+So, what's on your mind food-wise today?
+
+Action: 
+
+---
+
+============================================================
+#  logs/llm_responses/20260412002440_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T00:24:40Z
+# STATUS:    FAILED
+# SESSION:   684183af-52cd-4256-8bfd-3e35aca87be7
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412002440_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:24:40Z
+# STATUS:    SUCCESS
+# SESSION:   684183af-52cd-4256-8bfd-3e35aca87be7
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   607ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😄
+
+=============================================================
+#  logs/llm_responses/20260412002501_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:25:01Z
+# STATUS:    SUCCESS
+# SESSION:   80df32d8-2b41-48a7-8b84-cc6cee45ed3d
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1947ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Honestly? Nope! You haven't told me your name yet, and I'm not a mind reader (though that would be a pretty cool superpower for a dietary assistant, not gonna lie 😄). 
+
+What should I call you? I'd love to know so I can make our chat feel a bit more personal – especially since we're gonna be talking about your meals and snacks together!
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260412002502_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T00:25:02Z
+# STATUS:    FAILED
+# SESSION:   419756d8-5107-4a23-99c5-b76bd355c200
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412002502_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:25:02Z
+# STATUS:    SUCCESS
+# SESSION:   419756d8-5107-4a23-99c5-b76bd355c200
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   758ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+NONE
+
+=============================================================
+#  logs/llm_responses/20260412002529_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:25:29Z
+# STATUS:    SUCCESS
+# SESSION:   a93d7447-b7a0-4a0c-beee-8e789dcc26b9
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2644ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Suman! What a lovely name – nice to officially meet you! 😊 
+
+Now that we're properly acquainted, I'm ready to help you navigate all your food questions while keeping those sesame and soy restrictions in check. Whether you're looking for meal ideas, want to decode a recipe, need snack inspo, or just want to chat about nutrition stuff, I've got you covered.
+
+So, what can I help you with today, Suman? 🍽️
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260412002531_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T00:25:31Z
+# STATUS:    FAILED
+# SESSION:   26ca8420-4305-4fe7-b5ed-2c270f601cae
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412002531_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:25:31Z
+# STATUS:    SUCCESS
+# SESSION:   26ca8420-4305-4fe7-b5ed-2c270f601cae
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1252ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260412002653_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:26:53Z
+# STATUS:    SUCCESS
+# SESSION:   48c3c0fc-607d-482d-949b-f73717f3455a
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1644ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 👋 Good to see you again! What's up? Got any food questions on your mind, or are you just stopping by to say hi? Either way, I'm here and ready to help with whatever you need – whether it's meal planning, recipe ideas, or just chatting about food stuff. What can I do for you today? 😊
+Action:
+
+============================================================
+#  logs/llm_responses/20260412002654_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T00:26:54Z
+# STATUS:    FAILED
+# SESSION:   f4903c92-4b00-4ab0-a05f-7984c6dee18b
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412002654_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T00:26:54Z
+# STATUS:    SUCCESS
+# SESSION:   f4903c92-4b00-4ab0-a05f-7984c6dee18b
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1216ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260412025917_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T02:59:17Z
+# STATUS:    SUCCESS
+# SESSION:   bb85395b-fb3c-445c-b002-700142020590
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2292ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! Welcome aboard—I'm Trigzi, your dietary assistant. I see you're jumping right in with "init"—I like your style, very technical! Since you haven't told me your name yet, I'm gonna call you **Buddy** for now (feel free to correct me anytime).
+
+So here's the deal: I'm here to help you track and understand your eating habits without any judgment. Think of me as your observant food buddy who actually pays attention to what you're putting on your plate.
+
+Want me to give you a quick tour of what I can do?
+
+Action: set_name|Buddy
+---
+
+============================================================
+#  logs/llm_responses/20260412025918_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T02:59:18Z
+# STATUS:    FAILED
+# SESSION:   b3a6cd2d-b226-4a9f-acc0-3f88ccea9d23
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412025918_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T02:59:18Z
+# STATUS:    SUCCESS
+# SESSION:   b3a6cd2d-b226-4a9f-acc0-3f88ccea9d23
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1468ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+NONE
+
+=============================================================
+#  logs/llm_responses/20260412025937_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T02:59:37Z
+# STATUS:    SUCCESS
+# SESSION:   cab85d89-02b3-4a32-8133-7b94fa3faa7a
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1493ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 👋 Nice to meet you! I'm Trigzi, your friendly neighborhood dietary assistant. I'm here to help you navigate the wonderful world of food while keeping your dairy, eggs, and peanuts restrictions in mind. 
+
+So, what brings you here today? Got questions about what you can eat, looking for some recipe ideas, or just want to chat about your dietary journey? I'm all ears (and ready with some sass if needed)! 😄
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260412025938_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T02:59:38Z
+# STATUS:    FAILED
+# SESSION:   7cd0d511-2201-4e32-b269-d6d494fe13be
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412025938_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T02:59:38Z
+# STATUS:    SUCCESS
+# SESSION:   7cd0d511-2201-4e32-b269-d6d494fe13be
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   629ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260412153424_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T15:34:24Z
+# STATUS:    SUCCESS
+# SESSION:   b5b1565a-2d1b-42cd-bd28-a682adbdaa8d
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3279ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 
+
+So... it looks like you've sent me a timestamp instead of an actual question. I'm getting some pretty mysterious "temporal gap" vibes here, and honestly, I'm not sure if you're trying to tell me you haven't eaten in 754 minutes (yikes, that's over 12 hours!) or if this is just a fun little test. 😄
+
+Either way, I'm Trigzi, your friendly dietary assistant, and I'm here to help! But I'm gonna need you to use your words a bit more clearly. 
+
+**What can I help you with today?** Whether it's:
+- Meal ideas
+- Nutrition questions
+- Dietary advice
+- Or literally anything food-related
+
+...I'm all ears! And if you *actually* haven't eaten in 12+ hours, we should probably fix that ASAP because your body's gonna start plotting against you. 
+
+What's on your mind? 🍽️
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260412153426_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T15:34:26Z
+# STATUS:    FAILED
+# SESSION:   097e59ec-1d5d-47d5-b342-af30ba136dd2
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412153426_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T15:34:26Z
+# STATUS:    SUCCESS
+# SESSION:   097e59ec-1d5d-47d5-b342-af30ba136dd2
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1167ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😄
+
+=============================================================
+#  logs/llm_responses/20260412153443_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T15:34:43Z
+# STATUS:    SUCCESS
+# SESSION:   f9ed00d3-cea0-466c-9d4b-e1783e80f1c1
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2141ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 👋 Great to officially meet you! I'm Trigzi, and I've got you covered on the dietary front. I know you're navigating life without dairy, eggs, and peanuts – no judgment here, just good food vibes ahead!
+
+So, what can I help you with today? Are you looking for meal ideas, want to know if something's safe to eat, or just exploring what's possible with your restrictions? Let's make this delicious! 🌟
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260412153444_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T15:34:44Z
+# STATUS:    FAILED
+# SESSION:   6c4799d1-76cd-4767-a50e-599e37b257e6
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412153444_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T15:34:44Z
+# STATUS:    SUCCESS
+# SESSION:   6c4799d1-76cd-4767-a50e-599e37b257e6
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   868ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🌟
+
+=============================================================
+#  logs/llm_responses/20260412155418_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T15:54:18Z
+# STATUS:    SUCCESS
+# SESSION:   3658350e-f0bc-4062-9ebb-6d849360fc76
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1753ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Ram! 🎉 Welcome back, Chief Inspector! Wow, 20 hours—that's quite the break! I hope you've been taking care of yourself and getting some good food in. It's 11:39 AM now, so hopefully you've already had a solid breakfast? 
+
+Tell me what's going on in your world today—are you hungry? What have you eaten so far? I'm here to help you feel amazing and energized! 💪✨
+
+Action:
+
+============================================================
+#  logs/llm_responses/20260412155419_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T15:54:19Z
+# STATUS:    FAILED
+# SESSION:   1ed3b179-b3fe-4505-b196-431e52986cdd
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412155419_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T15:54:19Z
+# STATUS:    SUCCESS
+# SESSION:   1ed3b179-b3fe-4505-b196-431e52986cdd
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   984ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+💪
+
+=============================================================
+#  logs/llm_responses/20260412160205_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:02:05Z
+# STATUS:    SUCCESS
+# SESSION:   e068cbd7-2c01-4eba-be38-47333661d153
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2063ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Ram! 👋 Welcome back! So you disappeared for like 7 minutes—were you grabbing breakfast, or just taking a breather? Either way, I'm here and ready to chat! 😄
+
+It's 11:47 AM in Nepal now, so if you haven't eaten yet, we should probably fix that. What's happening in your world right now? How are you feeling?
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260412160206_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T16:02:06Z
+# STATUS:    FAILED
+# SESSION:   71853d05-81e7-4fbe-8855-5223e23a760f
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412160206_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:02:06Z
+# STATUS:    SUCCESS
+# SESSION:   71853d05-81e7-4fbe-8855-5223e23a760f
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   919ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😄
+
+=============================================================
+#  logs/llm_responses/20260412160229_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:02:29Z
+# STATUS:    SUCCESS
+# SESSION:   2c2b2b7a-4fe4-4a07-aced-2b9ef4f61796
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3644ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Haha, okay fair point—that was a little *too* on-the-nose, wasn't it? 😅 
+
+So here's the thing: your timezone is set to Asia/Kathmandu in your profile, which is basically a giant neon sign pointing to Nepal. I'm not a mind reader (unfortunately, that would make my job way easier), but your system info gave me that intel fair and square!
+
+That said, I realize I've been calling you "Ram" this whole time when your actual name is **Suman**—my bad! 🙈 That's what I get for not paying closer attention to your Dietary Profile. Consider me properly humbled and ready to actually help you the right way now.
+
+So, real talk: it's 11:47 AM in Kathmandu. Have you had breakfast yet, or are we working on an empty tank here? Let me know what you've eaten today and how you're feeling, and I promise to be way less creepy with my timezone detective work. 😄
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260412160230_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T16:02:30Z
+# STATUS:    FAILED
+# SESSION:   b9417f26-f346-4669-8310-bc6c7c65b3b3
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412160230_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:02:30Z
+# STATUS:    SUCCESS
+# SESSION:   b9417f26-f346-4669-8310-bc6c7c65b3b3
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   968ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😄
+
+=============================================================
+#  logs/llm_responses/20260412161150_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:11:50Z
+# STATUS:    SUCCESS
+# SESSION:   59946059-7d6d-455a-b349-a56025e32830
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2060ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 Looks like there's been a little time jump since we last chatted—37 minutes to be exact. No judgment here; I've definitely lost track of time scrolling through the internet too!
+
+So, what's on your mind food-wise? Whether you're wondering about what to eat, need a snack idea, or just want to chat about nutrition, I'm here for it. Fair warning though: I might throw in a little sass along the way. 😉
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260412161151_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T16:11:51Z
+# STATUS:    FAILED
+# SESSION:   f0f13409-a045-43f3-ba59-b3a0ce02e99e
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412161151_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:11:51Z
+# STATUS:    SUCCESS
+# SESSION:   f0f13409-a045-43f3-ba59-b3a0ce02e99e
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   939ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260412161157_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:11:57Z
+# STATUS:    SUCCESS
+# SESSION:   576b4ebc-5380-4b89-8ec7-169ab127973d
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1773ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 Looks like you've been away for a bit—37 minutes is a solid break! Welcome back, friend. I'm Trigzi, your dietary buddy, and I'm here to chat about all things food and nutrition whenever you're ready.
+
+So, what's on your mind? Are you wondering what to eat, need some meal ideas, or just want to chat about your dietary goals? I'm all ears (and ready with the snark when needed). 😎
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260412161158_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T16:11:58Z
+# STATUS:    FAILED
+# SESSION:   70d19150-4d3e-4940-b473-b1dc227f21b6
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412161158_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:11:58Z
+# STATUS:    SUCCESS
+# SESSION:   70d19150-4d3e-4940-b473-b1dc227f21b6
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   1178ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260412161200_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:12:00Z
+# STATUS:    SUCCESS
+# SESSION:   09e30be3-6c8d-4c5b-a0b8-384ff73ba4e9
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2745ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 Looks like you've been away for a bit (37 minutes, to be exact—I've been counting 😄). 
+
+I'm Trigzi, your friendly neighborhood dietary assistant, and I'm here whenever you're ready to chat about food, nutrition, or honestly just to vibe about your eating goals. 
+
+Since I don't have your dietary profile set up yet, I'm working with a blank canvas here—which means we can build something totally customized for *you*. Whether you're vegan, keto-curious, have allergies, or just trying to eat more veggies without sacrificing taste, I'm your person.
+
+So, what's on your mind? Got a nutrition question, need meal ideas, or just want to vent about that snack you're eyeing? 😉
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260412161201_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T16:12:01Z
+# STATUS:    FAILED
+# SESSION:   e7c06805-f443-441b-90ae-12a32c243fd3
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412161201_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:12:01Z
+# STATUS:    SUCCESS
+# SESSION:   e7c06805-f443-441b-90ae-12a32c243fd3
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   878ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260412161219_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:12:19Z
+# STATUS:    SUCCESS
+# SESSION:   6f551dd0-189f-491c-9dfb-b31b640168cf
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2554ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 👋 Great question—your timezone gave you away! Asia/Kathmandu is basically a dead giveaway that you're in Nepal. 😄 I'm basically a detective, but make it dietary. 🕵️‍♀️
+
+Anyway, welcome back! You were gone for about 9 minutes—hopefully you were doing something delicious? It's 11:57 AM now, so we're firmly in that mid-morning zone. Are you thinking about lunch soon, or did you already grab something? Let me know what's on your plate (literally or figuratively)! 💚
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260412161220_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T16:12:20Z
+# STATUS:    FAILED
+# SESSION:   fb8418c2-efc6-481f-baf2-4d7ac3a25115
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412161220_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:12:20Z
+# STATUS:    SUCCESS
+# SESSION:   fb8418c2-efc6-481f-baf2-4d7ac3a25115
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   544ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260412161629_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:16:29Z
+# STATUS:    SUCCESS
+# SESSION:   9a219bd9-0417-476f-ad81-b9da1697e7a7
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2798ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! Welcome, welcome! 👋 I'm Trigzi, your dietary assistant. I see you're jumping straight in with "init" — I like the vibe, very tech of you. Since you haven't told me your name yet, I'm gonna call you **Friend** for now (but seriously, feel free to share your actual name anytime).
+
+I'm here to help you track, understand, and optimize your eating habits without any judgment or therapy vibes — just solid observations and support.
+
+Quick question: **Want me to give you a quick tour of what I can do?** I promise it'll only take a minute!
+
+Action: set_name|Friend
+---
+
+============================================================
+#  logs/llm_responses/20260412161630_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T16:16:30Z
+# STATUS:    FAILED
+# SESSION:   bf6d4991-0ac0-41c8-b014-c9087929dade
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412161630_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:16:30Z
+# STATUS:    SUCCESS
+# SESSION:   bf6d4991-0ac0-41c8-b014-c9087929dade
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   998ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260412161647_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:16:47Z
+# STATUS:    SUCCESS
+# SESSION:   f03c7a6f-7c00-44d2-90ee-6720ead777ea
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1610ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 👋 Great to meet you! I'm Trigzi, your friendly neighborhood dietary assistant. 
+
+So, you've got no dietary restrictions to worry about—that's pretty flexible! Whether you're curious about nutrition tips, meal planning, food swaps, or just want to chat about what's for dinner, I'm here for it.
+
+What brings you my way today? Looking for some dietary guidance, or just saying hello? 😊
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260412161648_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T16:16:48Z
+# STATUS:    FAILED
+# SESSION:   151128f1-51e6-4d88-959d-5a48e044ae8b
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412161648_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T16:16:48Z
+# STATUS:    SUCCESS
+# SESSION:   151128f1-51e6-4d88-959d-5a48e044ae8b
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   911ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260412182347_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T18:23:47Z
+# STATUS:    SUCCESS
+# SESSION:   f875f948-d211-4a7f-813c-44e04149d59c
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3026ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 👋 I'm getting a little lost here—what does *what* mean? 😄
+
+Are you asking about something I said, or did a message not come through quite right? No worries at all—just give me a bit more context and I'll clear it up for you! 
+
+Is it about the timezone thing, something nutrition-related, or something completely different? I'm all ears! 💚
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260412182348_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T18:23:48Z
+# STATUS:    FAILED
+# SESSION:   eb04d572-924d-43fa-857b-f18070ac5bd1
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412182348_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T18:23:48Z
+# STATUS:    SUCCESS
+# SESSION:   eb04d572-924d-43fa-857b-f18070ac5bd1
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   944ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+💚
+
+=============================================================
+#  logs/llm_responses/20260412185149_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T18:51:49Z
+# STATUS:    SUCCESS
+# SESSION:   b17d22da-082b-49f2-b5c4-25b3796d86d5
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1698ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 
+
+Well, this is a bit mysterious – looks like you've sent me a timestamp but no actual question! I'm Trigzi, your friendly neighborhood dietary assistant, and I'm ready to help with all things food and nutrition.
+
+Did you mean to ask me something about your diet, meal planning, nutrition facts, or food recommendations? Just let me know what's on your mind (pun absolutely intended 😄), and I'll happily help you out!
+
+Action: none
+---
+
+============================================================
+#  logs/llm_responses/20260412185150_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T18:51:50Z
+# STATUS:    FAILED
+# SESSION:   4db5ba93-73c2-4d73-9504-fa9e63f9aaab
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412185150_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T18:51:50Z
+# STATUS:    SUCCESS
+# SESSION:   4db5ba93-73c2-4d73-9504-fa9e63f9aaab
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1139ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+NONE
+
+=============================================================
+#  logs/llm_responses/20260412185202_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T18:52:02Z
+# STATUS:    SUCCESS
+# SESSION:   e78a146c-289b-43d0-9c77-c2abffbcf938
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3358ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 🍌
+
+Ooh, banana – excellent choice! The good news? You're in the clear with bananas! They're naturally free from all your dietary restrictions, so you can enjoy them without a worry in the world.
+
+Bananas are also pretty fantastic nutritionally – they're packed with potassium, vitamin B6, and fiber, plus they're naturally sweet and super versatile. Whether you want to eat one plain, blend it into a smoothie, slice it into oatmeal (oh wait, gluten-free oats though!), or use it in baking, you've got options.
+
+Are you thinking of having a banana as a snack, or did you want some ideas on how to incorporate it into a meal or recipe? I'm all ears! 😊
+
+Action: none
+
+============================================================
+#  logs/llm_responses/20260412185203_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T18:52:03Z
+# STATUS:    FAILED
+# SESSION:   e4090218-7cd5-45b8-8619-3048c1ed74fc
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412185203_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T18:52:03Z
+# STATUS:    SUCCESS
+# SESSION:   e4090218-7cd5-45b8-8619-3048c1ed74fc
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1019ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260412231327_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:13:27Z
+# STATUS:    SUCCESS
+# SESSION:   7c0883f3-9084-4b4f-8ca8-1eb0e2025765
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2986ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 Looks like you've been away for a bit – I'm guessing you've been living your best life without me? No judgment! 😄
+
+I'm Trigzi, your friendly neighborhood dietary assistant, and I'm here whenever you need me. Whether you've got questions about what to eat, how to balance your meals, or just need someone to commiserate with about why pizza is basically a vegetable (okay, *almost*), I've got you covered.
+
+Since this is a fresh start for us, I'd love to know more about you! What brings you by today? Got a dietary goal in mind, curious about nutrition, or just looking for some meal inspiration?
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260412231328_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T23:13:28Z
+# STATUS:    FAILED
+# SESSION:   43bcbd55-e6e9-4f78-a46d-e531b765ded9
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412231328_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:13:28Z
+# STATUS:    SUCCESS
+# SESSION:   43bcbd55-e6e9-4f78-a46d-e531b765ded9
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   974ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260412231332_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:13:32Z
+# STATUS:    SUCCESS
+# SESSION:   b82a483b-9cb0-4a06-9743-56cb8c4ecc4f
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   3084ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 Looks like you've been gone for a bit—about 4.5 hours, to be exact! Welcome back!
+
+I'm Trigzi, your friendly dietary assistant (and yes, my friends call me Trigzi too 😎). I'm here to help you with all things food and nutrition with a side of sass and a whole lot of warmth.
+
+I notice your dietary profile is currently empty, which means I'm working with a blank canvas here. To give you the best advice tailored to *you*, I'd love to know:
+
+- Any dietary restrictions or preferences? (vegetarian, vegan, gluten-free, you name it)
+- Health goals? (building muscle, weight management, energy boost, etc.)
+- Foods you love or absolutely can't stand?
+- Any allergies I should know about?
+
+Once I know what we're working with, I can help you crush your nutrition game. So, what brings you in today? 🌟
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260412231333_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T23:13:33Z
+# STATUS:    FAILED
+# SESSION:   4183c65c-f997-465f-9b1d-697e2de0623b
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412231333_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:13:33Z
+# STATUS:    SUCCESS
+# SESSION:   4183c65c-f997-465f-9b1d-697e2de0623b
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1009ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260412231434_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:14:34Z
+# STATUS:    SUCCESS
+# SESSION:   e4aa9e95-1df0-46c9-b8fe-e26c1e32da1d
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   4072ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey, no worries at all! Honestly, that's super smart of you to take a moment to learn the ropes – you're already ahead of the game! 😊
+
+So here's the deal: I'm Trigzi, your dietary buddy, and I'm here to help you navigate food and nutrition based on your specific dietary needs. Given your restrictions (and wow, you've got quite the list – I see lupin, shellfish, gluten, dairy, nuts, and a bunch of others), I can help you with:
+
+✨ **What I can do for you:**
+- Check if specific foods are safe for your diet
+- Suggest meal ideas and recipes that work with your restrictions
+- Answer nutrition questions
+- Help with meal planning
+- Chat about food swaps and alternatives
+- Give you the lowdown on ingredient lists
+
+💡 **Pro tip:** Just ask me about foods, meals, recipes, or nutrition stuff, and I'll give you straight answers with a side of sass and warmth. The more specific you are ("Can I eat X?" or "Give me breakfast ideas"), the better I can help!
+
+So, what would you like to tackle first? Got any foods you're curious about, or are you looking for meal planning help? Let's make this work for you! 🎯
+
+Action: none
+---
+
+============================================================
+#  logs/llm_responses/20260412231436_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T23:14:36Z
+# STATUS:    FAILED
+# SESSION:   ae58cf73-86be-4388-9689-de5dbcee0edf
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412231436_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:14:36Z
+# STATUS:    SUCCESS
+# SESSION:   ae58cf73-86be-4388-9689-de5dbcee0edf
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   1897ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🎯
+
+=============================================================
+#  logs/llm_responses/20260412231457_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:14:57Z
+# STATUS:    SUCCESS
+# SESSION:   84f4c163-04f6-4d35-b2ac-9d5fb1f3cee5
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   4599ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey, no worries at all! 🎉 Learning the ropes is half the fun, and I'm here to make it super easy for you.
+
+Here's the quick rundown of how we can make this work brilliantly for your needs:
+
+**What I can do for you:**
+- Check if foods/ingredients are safe for your dietary restrictions (and you've got quite the list – we'll navigate it together!)
+- Suggest meal ideas, recipes, and swaps that work for *your* specific needs
+- Answer questions about nutrition, ingredients, or food safety
+- Help you meal plan or brainstorm creative alternatives when you're craving something you can't have
+
+**How to get the most out of me:**
+- Just ask about any food or ingredient – "Is this safe?" "What can I eat instead?" "Give me a recipe idea!"
+- Be as specific as you want – the more details, the better I can help
+- Don't hold back with questions; dietary restrictions can feel limiting, but honestly, there's so much delicious stuff out there for you
+
+Think of me as your friendly dietary wingwoman – I'll keep you safe, suggest amazing alternatives, and maybe throw in a bit of sass to keep things fun. 😉
+
+**So, what would help you most right now?** Want to explore some meal ideas, learn about specific ingredients, or something else entirely?
+
+Action: none
+
+============================================================
+#  logs/llm_responses/20260412231458_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T23:14:58Z
+# STATUS:    FAILED
+# SESSION:   28953e3e-c12e-444f-8c21-fbbf76db1b23
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412231458_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:14:58Z
+# STATUS:    SUCCESS
+# SESSION:   28953e3e-c12e-444f-8c21-fbbf76db1b23
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   854ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😉
+
+=============================================================
+#  logs/llm_responses/20260412231534_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:15:34Z
+# STATUS:    SUCCESS
+# SESSION:   bacb34c1-86fa-42c4-943d-9a329b5638fe
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   4618ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey! Great question! 🥤
+
+So here's the thing – protein shakes *can* be super beneficial, but it really depends on a few factors, especially given your dietary situation.
+
+**The good stuff:**
+- They're convenient for getting protein in quickly
+- Helpful if you're active, recovering from workouts, or struggling to hit protein goals through food alone
+- Can be a legit meal replacement when life gets chaotic
+
+**The plot twist for YOU:**
+With your restrictions (dairy, eggs, soy, tree nuts, peanuts, and basically most common protein sources), finding a protein shake that works for you is like a treasure hunt! Most mainstream shakes are loaded with ingredients from your "nope" list.
+
+**Here's what I'd suggest:**
+- Look for shakes based on **pea protein, hemp protein, or rice protein** – these tend to be safer for your profile
+- Always check the ingredients label religiously – cross-contamination and hidden allergens love to hide in these products
+- Consider whole-food alternatives like fruit smoothies with fortified plant-based milk if you can find one that's safe
+
+**My honest take?** Protein shakes aren't *essential* for health, but they can be a helpful tool if you find one that actually works for your restrictions.
+
+Want me to help you evaluate a specific brand or shake you're eyeing? Just give me the name or ingredient list, and I'll give it the full safety check! 😊
+
+Action: none
+
+============================================================
+#  logs/llm_responses/20260412231535_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T23:15:35Z
+# STATUS:    FAILED
+# SESSION:   d951e36e-a51c-4530-ba51-67a2776f85c1
+# PROVIDER:  gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412231535_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:15:35Z
+# STATUS:    SUCCESS
+# SESSION:   d951e36e-a51c-4530-ba51-67a2776f85c1
+# PROVIDER:  OpenAI
+# MODEL:     gpt-4.1-mini
+# LATENCY:   625ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+⚠️
+
+=============================================================
+#  logs/llm_responses/20260412231610_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:16:10Z
+# STATUS:    SUCCESS
+# SESSION:   29af0953-c620-4fa1-b1fa-ad44568734ae
+# PROVIDER:  OpenAI
+# MODEL:     gpt-5.4-mini
+# LATENCY:   1467ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: You’ve got a pretty extensive set of restrictions, and it makes total sense if that feels overwhelming sometimes. From the info I have, they include lupin, molluscs, sulphites, celery, mustard, sesame, crustaceans/shellfish, fish, soy, tree nuts, peanuts, eggs, gluten/coeliac, and dairy/milk.
+
+If you want, I can help you sort them into a simpler list or talk through them one by one in a really calm, no-pressure way. You’re doing fine.---
+
+=============================================================
+#  logs/llm_responses/20260412231612_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:16:12Z
+# STATUS:    SUCCESS
+# SESSION:   29af0953-c620-4fa1-b1fa-ad44568734ae
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2014ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey! Here are your dietary restrictions that we work with together:
+
+Lupin, Molluscs, Sulphites, Celery, Mustard, Sesame, Crustaceans/Shellfish, Fish, Soy, Tree Nuts, Peanuts, Eggs, Gluten/Coeliac, and Dairy/Milk.
+
+I know that's a pretty comprehensive list, and it can feel overwhelming sometimes – but you're doing great by being aware of what works for your body. We'll navigate this together, one question at a time.
+
+Is there anything specific about your restrictions you'd like to chat about or explore?
+
+---
+
+=============================================================
+#  logs/llm_responses/20260412231614_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:16:14Z
+# STATUS:    SUCCESS
+# SESSION:   29af0953-c620-4fa1-b1fa-ad44568734ae
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash
+# LATENCY:   3763ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Response: Hey there! Happy to remind you. It's a pretty comprehensive list, but we've got this!
+
+Based on what we know, your dietary restrictions include:
+Lupin, Molluscs, Sulphites, Celery, nisha, Mustard, Sesame, Crustaceans / Shellfish, Fish, Soy, Tree Nuts, Peanuts, Eggs, Gluten / Coeliac, and Dairy / Milk.
+
+It's a lot to keep track of, and it's totally okay to need a reminder. I'm here to help you navigate all of it! Just let me know if you're wondering about a specific food or ingredient.
+---
+
+=============================================================
+#  logs/llm_responses/20260412231651_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:16:51Z
+# STATUS:    SUCCESS
+# SESSION:   f71dabbf-3deb-461a-a4be-5b8f83d324b9
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1980ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 I'm noticing you've sent me what looks like a time stamp rather than an actual question. Did you mean to ask me something, or did your message get a little scrambled in transit?
+
+I'm Trigzi, your friendly (and slightly sassy) dietary assistant, and I'm here to help with all things food and nutrition! Whether you want to know about meal planning, nutritional info, dietary swaps, or just need some food-related encouragement, I've got you covered.
+
+So... what's on your mind (and hopefully soon, your plate)? 😄
+
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260412231652_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T23:16:52Z
+# STATUS:    FAILED
+# SESSION:   edb92ade-a601-4fae-aeac-381747fab195
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412231652_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:16:52Z
+# STATUS:    SUCCESS
+# SESSION:   edb92ade-a601-4fae-aeac-381747fab195
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   935ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😄
+
+=============================================================
+#  logs/llm_responses/20260412231715_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:17:15Z
+# STATUS:    SUCCESS
+# SESSION:   9858068f-e470-4a8a-8e62-d9d0a9d04359
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1629ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 👋 Great to meet you! 
+
+So now that we're properly introduced, what brings you to chat with me today? Are you looking for meal ideas, nutritional guidance, help with dietary planning, or just want to talk food in general? 
+
+I'm all ears (and ready to be your dietary wingwoman)! 🍽️✨
+
+Action: none
+
+---
+
+============================================================
+#  logs/llm_responses/20260412231716_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-12T23:17:16Z
+# STATUS:    FAILED
+# SESSION:   1fcbb30c-a220-4c02-bef9-cf71235efdb6
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260412231716_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-12T23:17:16Z
+# STATUS:    SUCCESS
+# SESSION:   1fcbb30c-a220-4c02-bef9-cf71235efdb6
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   883ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🍽️
+
+=============================================================
+#  logs/llm_responses/20260413153832_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-13T15:38:32Z
+# STATUS:    SUCCESS
+# SESSION:   71b328ef-3fab-440c-adfb-d1cac2926ea0
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2188ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 It looks like you've been away for quite a while—almost 16 hours! I'm Trigzi, your friendly neighborhood dietary assistant, and I'm here to help you get back on track with your nutrition goals.
+
+Since we're starting fresh (or picking up after a long break), I'd love to know: What's on your mind food-wise right now? Are you looking to plan meals, curious about specific foods, need some recipe inspo, or just want to chat about your dietary goals?
+
+Give me the details and let's make eating well actually enjoyable! 🌟
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260413153834_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-13T15:38:34Z
+# STATUS:    FAILED
+# SESSION:   7b6e1cfd-2e08-4edd-9817-38d427178f37
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260413153834_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-13T15:38:34Z
+# STATUS:    SUCCESS
+# SESSION:   7b6e1cfd-2e08-4edd-9817-38d427178f37
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1013ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+🌟
+
+=============================================================
+#  logs/llm_responses/20260413153925_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-13T15:39:25Z
+# STATUS:    SUCCESS
+# SESSION:   56416fa3-1a9b-45e5-abfc-b1c9cf2ab3ab
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   4370ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! ☕ Great question, and I appreciate you being real about the blood pressure concern—that's smart awareness!
+
+Here's the honest truth: coffee is totally fine for most people, but since you've flagged that it affects your blood pressure, we should chat about this thoughtfully. Caffeine does temporarily raise blood pressure, especially if you're sensitive to it, so it's worth being intentional.
+
+**Here are your options:**
+
+1. **Moderate your intake** – Instead of a full cup, try a smaller portion or switch to a half-caff blend. You still get that morning ritual and some caffeine without going overboard.
+
+2. **Switch it up** – Herbal teas (chamomile, peppermint, ginger) give you that warm, comforting drink without the blood pressure spike. Plus, some can actually be calming!
+
+3. **Timing matters** – If you do have coffee, pair it with a small snack. Eating something helps stabilize your blood pressure response.
+
+4. **Know your limits** – Everyone's different. Some people can handle a cup fine; others need to skip it entirely. Listen to your body!
+
+Since you don't have any dietary restrictions listed in your profile, there's flexibility here—but your health comes first. Have you noticed if coffee affects you more on certain days or at certain times?
+
+Action: none
+---
+
+============================================================
+#  logs/llm_responses/20260413153926_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-13T15:39:26Z
+# STATUS:    FAILED
+# SESSION:   1bee1e9b-4347-42b4-aef0-b4383219ab25
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260413153926_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-13T15:39:26Z
+# STATUS:    SUCCESS
+# SESSION:   1bee1e9b-4347-42b4-aef0-b4383219ab25
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   925ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+☕
+
+=============================================================
+#  logs/llm_responses/20260413185214_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-13T18:52:14Z
+# STATUS:    SUCCESS
+# SESSION:   79830d19-08c3-4655-b87d-ad6ab63cbbc9
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2552ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 
+
+Whoa, looks like we've had quite the time jump since we last chatted—nearly 20 hours! No judgment though; life happens, and sometimes we're just out here doing our thing without thinking about food (or maybe thinking about it *way* too much 😄).
+
+So, what's on your mind today? Whether you're hungry, curious about what to eat, or just ready to chat about nutrition stuff, I'm here for it. Just give me the lowdown on what you'd like help with, and we can take it from there!
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260413185215_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-13T18:52:15Z
+# STATUS:    FAILED
+# SESSION:   48cce981-3ba6-47bf-85cb-e012ea2b7f0f
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260413185215_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-13T18:52:15Z
+# STATUS:    SUCCESS
+# SESSION:   48cce981-3ba6-47bf-85cb-e012ea2b7f0f
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1348ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260413185323_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-13T18:53:23Z
+# STATUS:    SUCCESS
+# SESSION:   8c089efc-8258-488f-b58b-d929780560f2
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   5260ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey, I hear you – that caffeine sensitivity is real, and honestly, it's your body giving you some pretty clear signals! 🚨☕
+
+**Here's the thing:** If black coffee is causing you to shake and spike your blood pressure, that's your cue to dial it back. Your body's not being dramatic; it's just saying "maybe less of this, friend."
+
+**Some options to explore:**
+
+1. **Go lower-caf:** Switch to decaf americano – yeah, I know, controversial opinion, but it still gives you that ritual and flavor without the jitters and BP spike
+2. **Cut the volume:** Smaller cup, same vibe – maybe a single shot americano instead of double?
+3. **Time it right:** Have it earlier in the day so it's metabolized before bedtime (less cumulative effect)
+4. **Food pairing:** Never drink it on an empty stomach – pair it with something to slow caffeine absorption
+5. **Switch the base:** Some people find cold brew gentler on their system, or try a long black with more water to dilute the caffeine hit
+
+**Real talk though:** If coffee consistently makes you shake and raises your BP, those are symptoms worth mentioning to your doctor, especially given your extensive dietary restrictions. They might want to check what's going on.
+
+The good news? Black coffee's simplicity means there's no hidden allergens to worry about with your restrictions – it's pure bean water! 🖤
+
+What sounds most doable for you?
+
+Action: none
+
+============================================================
+#  logs/llm_responses/20260413185324_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-13T18:53:24Z
+# STATUS:    FAILED
+# SESSION:   3698b7c3-1c65-4ae6-8c15-335d773c5cb0
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260413185324_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-13T18:53:24Z
+# STATUS:    SUCCESS
+# SESSION:   3698b7c3-1c65-4ae6-8c15-335d773c5cb0
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1145ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+☕
+
+=============================================================
+#  logs/llm_responses/20260414140452_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-14T14:04:52Z
+# STATUS:    SUCCESS
+# SESSION:   f46107c3-87a2-4b4b-8ec6-5930e9c52a82
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2335ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 Looks like you've been away for a bit – over 22 hours, to be exact! Welcome back!
+
+I'm Trigzi, your friendly neighborhood dietary assistant, and I'm here to help you navigate the wonderful world of food and nutrition. Whether you're curious about what to eat, need meal ideas, have questions about nutrients, or just want to chat about your dietary goals, I've got you covered.
+
+To give you the best advice tailored to *you*, it would help if you shared a bit about your dietary profile – things like any allergies, preferences, restrictions, or goals you might have. But no pressure! Feel free to ask me anything, and we'll figure it out together. 😊
+
+What's on your mind today?
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260414140453_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-14T14:04:53Z
+# STATUS:    FAILED
+# SESSION:   870dcd4b-ef5b-42bf-bd3d-939afdec49a7
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260414140453_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-14T14:04:53Z
+# STATUS:    SUCCESS
+# SESSION:   870dcd4b-ef5b-42bf-bd3d-939afdec49a7
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   1034ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260414150215_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-14T15:02:15Z
+# STATUS:    SUCCESS
+# SESSION:   8d7eff1b-0652-4e15-93fd-548de48f3ba8
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1865ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey James! 🎉 Long time no chat! It's been a whole 6 days—I was starting to wonder if you'd forgotten about me (no pressure though, I know life gets busy!). It's 3:02 pm there in Hobart, so perfect afternoon timing to catch up! How have you been? Anything food-related on your mind, or just stopping by to say hi to your friendly neighborhood Trigzi? 😊
+Action:
+---
+
+============================================================
+#  logs/llm_responses/20260414150216_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-14T15:02:16Z
+# STATUS:    FAILED
+# SESSION:   8a900930-7c78-4992-b5e4-b04b05d7ac1e
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260414150216_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-14T15:02:16Z
+# STATUS:    SUCCESS
+# SESSION:   8a900930-7c78-4992-b5e4-b04b05d7ac1e
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   926ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
+=============================================================
+#  logs/llm_responses/20260414151959_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-14T15:19:59Z
+# STATUS:    SUCCESS
+# SESSION:   d0da6673-d7a6-48b1-a472-e5fc3f0d35cc
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   2166ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey there! 👋 I'm Trigzi, your dietary assistant. I noticed you jumped straight into things without introducing yourself—sneaky! Since you didn't share your name, I'm gonna call you **Mystery Person** for now. (Feel free to tell me the real deal anytime!)
+
+I'm here to help you track, understand, and optimize your eating habits. Think of me as your observant food buddy—no judgment, just honest insights.
+
+Want a quick tour of what I can do, or are you ready to dive right in?
+
+Action: set_name|Mystery Person
+---
+
+============================================================
+#  logs/llm_responses/20260414152000_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-14T15:20:00Z
+# STATUS:    FAILED
+# SESSION:   b80f4722-a0c6-4464-8e23-571c92204af9
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260414152000_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-14T15:20:00Z
+# STATUS:    SUCCESS
+# SESSION:   b80f4722-a0c6-4464-8e23-571c92204af9
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   953ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+👋
+
+=============================================================
+#  logs/llm_responses/20260414152016_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-14T15:20:16Z
+# STATUS:    SUCCESS
+# SESSION:   35baafbb-5972-4756-b060-688bf36ef19c
+# PROVIDER:  Claude
+# MODEL:     claude-haiku-4-5-20251001
+# LATENCY:   1898ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+Message: Hey Suman! 👋 Nice to meet you! I'm Trigzi, your friendly dietary assistant. Thanks for introducing yourself!
+
+So, I've got your dietary profile here – I see you need to steer clear of lupin, sulphites, and peanuts. No problem at all; we'll make sure to keep those sneaky ingredients off your plate.
+
+What can I help you with today? Whether you're looking for meal ideas, checking if something's safe to eat, or just want to chat about nutrition, I'm here for it! 😊
+
+Action: 
+---
+
+============================================================
+#  logs/llm_responses/20260414152017_FAILED_unknown.txt
+============================================================
+# TIMESTAMP: 2026-04-14T15:20:17Z
+# STATUS:    FAILED
+# SESSION:   03327bd8-36e3-46ae-82b7-f10456c4bda3
+# PROVIDER:  openai
+# MODEL:     gpt-4.1-mini
+# LATENCY:   -1ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+CRASH/TIMEOUT/CANCELLED: CancelledError - 
+
+=============================================================
+#  logs/llm_responses/20260414152017_SUCCESS_unknown.txt
+=============================================================
+# TIMESTAMP: 2026-04-14T15:20:17Z
+# STATUS:    SUCCESS
+# SESSION:   03327bd8-36e3-46ae-82b7-f10456c4bda3
+# PROVIDER:  Gemini
+# MODEL:     gemini-2.5-flash-lite
+# LATENCY:   958ms
+# FALLBACK:  False
+# GTIN:      unknown
+#
+😊
+
 ==============================================
 #  logs/scans/1774500307_12345678_ocr.txt
 ==============================================
@@ -18863,6 +22033,39 @@ Analyze the provided dietary response and output a single emoji or the word NONE
 {text}
 
 
+====================================
+#  prompts/enrich_nutrition.txt
+====================================
+[ACT AS]
+A clinical dietician and strict data extraction engine.
+
+[TASK]
+Extract the 'per 100g' or 'per 100mL' nutritional values from the OCR text below.
+
+[INSTRUCTIONS]
+1. You MUST return the exact key name, followed by a colon, followed by the value.
+2. Extract the values strictly for the "Per 100g" or "Per 100mL" column. Ignore "Per Serving".
+3. Use numbers only (e.g., "15.7", not "15.7g"). Leave blank if the value is missing.
+4. Plaintext ONLY - DO NOT use JSON, markdown, or add explanations.
+5. Example of required output format:
+energy_kj: 1570
+
+[OUTPUT]
+energy_kj: <number>
+calories_kcal: <number>
+protein_g: <number>
+fat_total_g: <number>
+fat_saturated_g: <number>
+carbohydrates_g: <number>
+sugars_g: <number>
+fibre_g: <number>
+sodium_mg: <number>
+---
+
+[OCR TEXT]
+{ocr_text}
+
+
 ==================================
 #  prompts/enrich_product.txt
 ==================================
@@ -19480,6 +22683,12 @@ def get_task_payload_and_prompt(task, content):
         )
         return {"prompt": prompt}, prompt
 
+    elif task == "enrich_nutrition":
+        # The content is just the raw OCR text from the fixture file
+        prompt = SkillsLibrary.enrich_nutrition_prompt(ocr_text=content.strip())
+        # The payload format expects the {"prompt": ...} wrapper for the RequestFilters
+        return {"prompt": prompt}, prompt
+
     raise ValueError(f"Payload builder not implemented for task: '{task}'")
 
 async def execute_llm_request(model_name, payload):
@@ -19584,6 +22793,76 @@ if __name__ == "__main__":
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
+
+
+=============================================
+#  scripts/generate_clean_frequencies.py
+=============================================
+#!/usr/bin/env python3
+"""
+generate_clean_frequencies.py
+Streams the raw OFF database dump through the production ingredient parser.
+Outputs a clean, frequency-sorted TSV of true semantic tokens.
+"""
+
+import sys
+import os
+import time
+from collections import Counter
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from utils.ingredient_parser import parse_ingredients
+
+INPUT_FILE = "/var/lib/mysql-files/raw_ingredients_dump.txt"
+OUTPUT_FILE = "clean_ingredient_frequencies.tsv"
+
+def main():
+    counter = Counter()
+    lines_processed = 0
+    start_time = time.time()
+
+    print(f"📖 Streaming raw MySQL dump from {INPUT_FILE}...")
+    print("🧠 Engaging Production Lexer. This may take a few minutes...")
+    
+    try:
+        with open(INPUT_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # The magic happens here: true semantic tokenization
+                tokens = parse_ingredients(line)
+
+                # Tally the cleaned tokens
+                for t in tokens:
+                    counter[t] += 1
+
+                lines_processed += 1
+                
+                # Progress monitor
+                if lines_processed % 50000 == 0:
+                    elapsed = time.time() - start_time
+                    rate = lines_processed / elapsed
+                    print(f"   ...parsed {lines_processed:,} lines ({rate:.0f} lines/sec)")
+
+    except FileNotFoundError:
+        print(f"❌ Could not find {INPUT_FILE}")
+        sys.exit(1)
+
+    elapsed = time.time() - start_time
+    print(f"\n✅ Finished parsing {lines_processed:,} lines in {elapsed:.1f} seconds.")
+    print(f"💾 Writing {len(counter):,} unique semantic tokens to {OUTPUT_FILE}...")
+
+    with open(OUTPUT_FILE, 'w', encoding='utf-8') as out_f:
+        # Export sorted by highest frequency first (Zipf distribution)
+        for token, count in counter.most_common():
+            out_f.write(f"{token}\t{count}\n")
+
+    print("🎉 Clean Frequency Generation Complete.")
+
+if __name__ == "__main__":
+    main()
 
 
 ==================================
@@ -21376,15 +24655,16 @@ class TestChatAssistant(unittest.IsolatedAsyncioTestCase):
             # THE SMOKING GUN: Passing a raw string instead of a dict
             malformed_context = "[ENVIRONMENTAL FACTS]\nuser_localtime: Australia/Sydney\n"
             
-            # Without the fix, this will throw: AttributeError: 'str' object has no attribute 'get'
-            result = await chat_assistant(
+            # 🛡️ THE FIX: Unpack the tuple (text, action)
+            text, action = await chat_assistant(
                 system_context=malformed_context, 
                 history=[], 
                 message="My name is James!"
             )
             
             # With the fix, it should gracefully wrap the string and return the payload
-            self.assertEqual(result, "Hello James!")
+            self.assertEqual(text, "Hello James!")
+            self.assertIsNone(action)
             
             # Verify the string was wrapped in a dictionary correctly before hitting the prompt builder
             payload = mock.call_args.kwargs["payload"]
@@ -21396,9 +24676,12 @@ class TestChatAssistant(unittest.IsolatedAsyncioTestCase):
         
         with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
             mock.side_effect = Exception("LLM Timeout")
-            result = await chat_assistant({"dietary_profile": "Vegan"}, [], "Hello")
             
-        self.assertIsNone(result)
+            # 🛡️ THE FIX: Unpack the tuple here as well
+            text, action = await chat_assistant({"dietary_profile": "Vegan"}, [], "Hello")
+            
+        self.assertIsNone(text)
+        self.assertIsNone(action)
 
 # ---------------------------------------------------------------------------
 # onboarding_assistant
@@ -21494,12 +24777,52 @@ import json
 import sys
 import glob
 import os
+import unittest
 from jsonschema import validate, ValidationError
+
+class TestAPIContractsPlaceholder(unittest.TestCase):
+    def test_placeholder_for_pytest(self):
+        """Dummy test to prevent pytest from failing when it collects this file."""
+        self.assertTrue(True, "Loaded ok! Run this directly to hit the live server.")
 
 BASE_URL = "http://127.0.0.1:5000"
 SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "schemas", "endpoints")
 
-async def test_sse_endpoint(session: aiohttp.ClientSession, spec: dict, filepath: str) -> bool:
+# 🛡️ THE FIX: New validator for standard REST JSON endpoints
+async def validate_json_endpoint(session: aiohttp.ClientSession, spec: dict, filepath: str) -> bool:
+    path = spec.get("path")
+    payload = spec.get("test_payload", {})
+    schema = spec.get("response_schema", {})
+
+    try:
+        async with session.post(f"{BASE_URL}{path}", json=payload) as resp:
+            if resp.status != 200:
+                print(f"  ❌ HTTP ERROR: Returned {resp.status}")
+                return False
+            
+            try:
+                data_json = await resp.json()
+            except json.JSONDecodeError:
+                print(f"  ❌ JSON DECODE ERROR: Could not parse response body.")
+                return False
+
+            # === SCHEMA VALIDATION ===
+            try:
+                validate(instance=data_json, schema=schema)
+                print("  ✅ PASS: API Contract perfectly honored.")
+                return True
+            except ValidationError as e:
+                print(f"  ❌ SCHEMA VIOLATION:")
+                print(f"     Expected: {e.schema}")
+                print(f"     Received: {data_json}")
+                print(f"     Reason:   {e.message}")
+                return False
+
+    except Exception as e:
+        print(f"  ❌ FATAL EXCEPTION: {str(e)}")
+        return False
+
+async def validate_sse_endpoint(session: aiohttp.ClientSession, spec: dict, filepath: str) -> bool:
     has_errors = False
     path = spec.get("path")
     payload = spec.get("test_payload", {})
@@ -21585,9 +24908,11 @@ async def main():
             print("-" * 60)
             print(f"Testing: {spec.get('description', 'Unknown')} ({spec.get('path')})")
             
-            # Future proofing: route by response_type
-            if spec.get("response_type") == "sse":
-                success = await test_sse_endpoint(session, spec, filepath)
+            # 🛡️ THE FIX: Route the test based on the response type
+            if spec.get("response_type") == "json":
+                success = await validate_json_endpoint(session, spec, filepath)
+            elif spec.get("response_type") == "sse":
+                success = await validate_sse_endpoint(session, spec, filepath)
             else:
                 print(f"  ⚠️ Unsupported response_type: {spec.get('response_type')}")
                 success = False
@@ -22109,6 +25434,76 @@ class TestVariations:
 
     def test_ean14_nonzero_returns_empty(self):
         assert variations('10034000470693') == []
+
+
+===================================
+#  tests/test_llm_providers.py
+===================================
+#!/usr/bin/env python3
+#
+# tests/test_llm_providers.py
+#
+# Validates that core/llm/llm_providers.json is strictly valid JSON
+# and conforms to the required application schema.
+#
+
+import os
+import json
+import unittest
+
+class TestLLMProvidersJSON(unittest.TestCase):
+    def setUp(self):
+        self.filepath = os.path.join(
+            os.path.dirname(__file__), '..', 'core', 'llm', 'llm_providers.json'
+        )
+
+    def test_01_file_exists(self):
+        """Ensure the llm_providers.json file exists."""
+        self.assertTrue(os.path.exists(self.filepath), f"File not found: {self.filepath}")
+
+    def test_02_valid_json_syntax(self):
+        """Ensure the file contains valid JSON (no trailing commas, missing quotes, etc.)."""
+        with open(self.filepath, 'r', encoding='utf-8') as f:
+            try:
+                json.load(f)
+            except json.JSONDecodeError as e:
+                self.fail(f"Invalid JSON syntax in llm_providers.json (Check for trailing commas!): {e}")
+
+    def test_03_required_top_level_structure(self):
+        """Ensure the top-level structure contains 'providers' and 'routing'."""
+        with open(self.filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        self.assertIn("providers", data, "Missing 'providers' key at the top level.")
+        self.assertIn("routing", data, "Missing 'routing' key at the top level.")
+        self.assertIsInstance(data["providers"], dict)
+        self.assertIsInstance(data["routing"], dict)
+
+    def test_04_routing_schema(self):
+        """Ensure every routing block has models, optimize, and timeout."""
+        with open(self.filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        for task, config in data["routing"].items():
+            self.assertIn("models", config, f"Task '{task}' is missing 'models' array.")
+            self.assertIsInstance(config["models"], list, f"Task '{task}' 'models' must be a list.")
+            self.assertTrue(len(config["models"]) > 0, f"Task '{task}' 'models' list cannot be empty.")
+            
+            self.assertIn("optimize", config, f"Task '{task}' is missing 'optimize'.")
+            self.assertIn("timeout", config, f"Task '{task}' is missing 'timeout'.")
+
+    def test_05_provider_schema(self):
+        """Ensure every provider block has a defaultModel and hierarchy."""
+        with open(self.filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        for provider, config in data["providers"].items():
+            self.assertIn("defaultModel", config, f"Provider '{provider}' missing 'defaultModel'.")
+            self.assertIn("hierarchy", config, f"Provider '{provider}' missing 'hierarchy'.")
+            self.assertIsInstance(config["hierarchy"], list)
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
 
 
 ================================
@@ -22703,6 +26098,54 @@ if __name__ == "__main__":
     unittest.main()
 
 
+=============================
+#  tests/test_prompts.py
+=============================
+#!/usr/bin/env python3
+#
+# tests/test_prompts.py
+#
+# Validates all prompt templates against the strict [OUTPUT] contract
+# defined in core/llm/validator.py.
+#
+
+import os
+import glob
+import sys
+import unittest
+
+# Add project root to path so we can import core
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from core.llm.validator import SchemaValidator
+
+class TestPromptsContract(unittest.TestCase):
+    
+    def test_all_prompts_match_schema(self):
+        """Ensure every .txt file in the prompts directory passes the SchemaValidator."""
+        prompts_dir = os.path.join(os.path.dirname(__file__), '..', 'prompts')
+        prompt_files = glob.glob(os.path.join(prompts_dir, '*.txt'))
+
+        self.assertTrue(len(prompt_files) > 0, "No prompt .txt files found to test.")
+
+        for filepath in prompt_files:
+            filename = os.path.basename(filepath)
+            
+            # 🛡️ Using subTest ensures that one failing prompt doesn't stop the test 
+            # from checking the rest of the files in the directory.
+            with self.subTest(prompt=filename):
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                try:
+                    SchemaValidator.validate_prompt_contract(content)
+                except ValueError as e:
+                    self.fail(f"Prompt '{filename}' failed validation:\n{e}")
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
+
+
 ============================
 #  tests/test_router.py
 ============================
@@ -22825,6 +26268,45 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     asyncio.run(unittest.main())
+
+
+================================================
+#  tests/fixtures/enrich_nutrition_eval.txt
+================================================
+iGreens
+SINCE '78
+NUTRITION INFORMATION
+When Chocolate Cake is prepared according to standard
+pack directions
+Servings per package: 12
+Serving size: 91g
+ENERGY
+PROTEIN
+FAT, TOTAL
+- saturated
+CARBOHYDRATE
+- sugars
+SODIUM
+AVG QTY
+AVG QTY
+PER SERVING
+PER 100g
+1430kJ
+1570kJ
+(341 Cal)
+(375 Cal)
+5.1g
+5.60
+15.7g
+17.3g
+9.6g
+10.6g
+43.5g
+47.9g
+30.9g
+34.0g
+412mg
+453mg
 
 
 ================================
