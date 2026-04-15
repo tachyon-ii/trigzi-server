@@ -40,3 +40,13 @@ __pycache__/
 *.log
 logs/
 clean_ingredient_frequencies.tsv.gz
+
+# ==========================================
+# 6. Data Files & Binaries
+# ==========================================
+*.tsv
+*.tsv.gz
+*.jsonl
+*.jsonl.gz
+*.bin
+*.gz
