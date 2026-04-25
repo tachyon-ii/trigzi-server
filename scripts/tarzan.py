@@ -51,6 +51,8 @@ def excluded_file(name: str) -> bool:
         return name in EXCLUDE_FILES
     if name.endswith(".txt"):
         return name in EXCLUDE_FILES
+    if name.endswith(".json"):
+        return name in EXCLUDE_FILES
     else:
         return name
 

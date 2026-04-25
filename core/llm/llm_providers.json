@@ -180,7 +180,7 @@
       },
       "chat_sigmund": {
         "models": [
-          "gemini-2.5-flash",
+          "gemini-2.5-pro",
         "gpt-5.4-mini",
         "claude-haiku-4-5-20251001"
         ],

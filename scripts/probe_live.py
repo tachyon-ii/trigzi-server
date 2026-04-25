@@ -39,6 +39,10 @@ PROVIDERS = {
     "openai": OpenAIProvider,
 }
 
+# Width to align model names against an optional [date] suffix in the
+# terminal output. Matches the previous in-probe formatting.
+_NAME_PAD = 38
+
 
 def check_env_keys() -> dict[str, bool]:
     """Check which API keys are present in the environment."""
@@ -55,6 +59,21 @@ async def probe_provider(name: str, provider) -> ProviderStatus:
     status = await provider.probe()
     return status
 
+
+def _format_model_line(name: str, metadata: dict) -> str:
+    """
+    Render a single model name for terminal display, optionally appending
+    a [YYYY-MM-DD] suffix when the provider exposed a release date in
+    metadata. This formatting used to live inside OpenAIProbeMixin —
+    moved here so the probe layer stays presentation-agnostic.
+    """
+    info = metadata.get(name, {}) if metadata else {}
+    created = info.get("created_at")
+    if created:
+        return f"       - {name:<{_NAME_PAD}} [{created}]"
+    return f"       - {name}"
+
+
 def print_status(status: ProviderStatus) -> None:
     icon    = "✅" if status.is_reachable else "❌"
     credit  = f"  credit_remaining={status.credit_remaining}" if status.credit_remaining is not None else ""
@@ -65,16 +84,18 @@ def print_status(status: ProviderStatus) -> None:
     print(f"     latency       : {status.latency_ms}ms")
     print(f"     default model : {valid}")
     print(f"     models found  : {len(status.available_models)}")
-    
-    # Show the complete list in the order provided by the backend
+
+    # Show the complete list in the order provided by the backend.
+    # Append a [YYYY-MM-DD] release date if metadata exposed one.
     if status.available_models:
         for m in status.available_models:
-            print(f"       - {m}")
- 
+            print(_format_model_line(m, status.model_metadata))
+
     if credit:
         print(f"     {credit.strip()}")
     if error:
         print(f"     {error.strip()}")
+
 
 async def main(targets: list[str]) -> None:
     print("\n── Live Provider Probe ─────────────────────────────────────")

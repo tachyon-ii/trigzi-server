@@ -57,13 +57,21 @@ class TestAnalyseProduct(unittest.IsolatedAsyncioTestCase):
     async def test_returns_result_on_success(self):
         from core.analyser import analyse_product
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_JSON_RESPONSE
+            # Mock the exact flat-text schema the LLM now outputs
+            mock.return_value = {
+                "result": "Valid_Input: true\nItem: Brand Name Crackers\nVerdict: Safe\nSummary: Safe to eat.\nWarnings: None\nIngredients: Wheat, Salt, Oil\nFlagged: None\nReasoning: Matches profile.\n---"
+            }
+            
             result = await analyse_product(
                 gtin="0070177161170",
                 text_front="Brand Name Crackers",
                 text_nutrition="Wheat, Salt, Oil"
             )
-        self.assertEqual(result, MOCK_RESULT)
+            
+            self.assertIsNotNone(result)
+            self.assertEqual(result["item"], "Brand Name Crackers")
+            self.assertEqual(result["verdict"], "Safe")
+            self.assertEqual(result["ingredients"], "Wheat, Salt, Oil")
 
     async def test_payload_contains_combined_text(self):
         from core.analyser import analyse_product
@@ -118,9 +126,17 @@ class TestAnalyseMeal(unittest.IsolatedAsyncioTestCase):
     async def test_returns_result_on_success(self):
         from core.analyser import analyse_meal
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
-            mock.return_value = MOCK_ROUTER_JSON_RESPONSE
+            # Mock the exact flat-text schema the LLM now outputs
+            mock.return_value = {
+                "result": "Valid_Input: true\nDish: Pad Thai\nVerdict: Caution\nSummary: Contains peanuts.\nWarnings: Peanuts\nIngredients: Noodles, peanuts, sauce\nFlagged: peanuts\nReasoning: Allergy detected.\n---"
+            }
+            
             result = await analyse_meal(image="base64data==", profile="Low FODMAP")
-        self.assertEqual(result, MOCK_RESULT)
+            
+            self.assertIsNotNone(result)
+            self.assertEqual(result["dish"], "Pad Thai")
+            self.assertEqual(result["verdict"], "Caution")
+            self.assertEqual(result["flagged"], "peanuts")
 
     async def test_payload_uses_image_base64_key(self):
         from core.analyser import analyse_meal

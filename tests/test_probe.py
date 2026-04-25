@@ -38,7 +38,17 @@ CLAUDE_EXPECTED = ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
 CLAUDE_MOCK_PAYLOAD = {"data": [{"id": m} for m in CLAUDE_EXPECTED]}
 
 OPENAI_EXPECTED = ["gpt-4o", "gpt-4o-mini", "o3"]
-OPENAI_MOCK_PAYLOAD = {"data": [{"id": m} for m in OPENAI_EXPECTED]}
+# OpenAI returns a 'created' unix timestamp per model — the probe layer now
+# uses this to populate ProviderStatus.model_metadata. The values below are
+# arbitrary but deterministic so test assertions can verify the mapping.
+OPENAI_CREATED = {
+    "gpt-4o":      1715472000,  # 2024-05-12 (UTC)
+    "gpt-4o-mini": 1721260800,  # 2024-07-18 (UTC)
+    "o3":          1744156800,  # 2025-04-09 (UTC)
+}
+OPENAI_MOCK_PAYLOAD = {
+    "data": [{"id": m, "created": OPENAI_CREATED[m]} for m in OPENAI_EXPECTED]
+}
 
 
 # MARK: - Shared mock helpers
@@ -88,7 +98,8 @@ class TestProviderStatus(unittest.TestCase):
             available_models=[], default_model_valid=False,
             credit_remaining=None, error="Timeout"
         )
-        self.assertIn("❌", text := str(s))
+        text = str(s)
+        self.assertIn("❌", text)
         self.assertIn("Claude", text)
         self.assertNotIn("credit=", text)
 
@@ -106,9 +117,14 @@ class TestProviderStatus(unittest.TestCase):
 class TestGeminiProbe(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_probe(self):
-        """Gemini probe extracts model names and strips 'models/' prefix."""
-        headers = {"x-goog-quota-remaining": "800"}
-        resp_cm, _ = make_mock_response(200, GEMINI_MOCK_PAYLOAD, headers)
+        """Gemini probe extracts model names and strips 'models/' prefix.
+
+        Gemini does not expose remaining-quota in successful response headers
+        (quota info comes back only inside 429 error bodies as structured
+        QuotaFailure details). So credit_remaining is expected to be None
+        on a successful probe and is not asserted here.
+        """
+        resp_cm, _ = make_mock_response(200, GEMINI_MOCK_PAYLOAD)
         session_cm = make_mock_session(resp_cm)
 
         provider = GeminiProvider()
@@ -118,7 +134,6 @@ class TestGeminiProbe(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status.is_reachable)
         for expected_model in GEMINI_EXPECTED:
             self.assertIn(expected_model, status.available_models)
-        self.assertEqual(status.credit_remaining, 800)
         self.assertGreaterEqual(status.latency_ms, 0)
 
     async def test_default_model_validated(self):
@@ -195,7 +210,7 @@ class TestClaudeProbe(unittest.IsolatedAsyncioTestCase):
 class TestOpenAIProbe(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_probe(self):
-        """OpenAI probe uses 'id' key and reads ratelimit header."""
+        """OpenAI probe returns clean model identifiers and reads ratelimit header."""
         headers = {"x-ratelimit-remaining-requests": "199"}
         resp_cm, _ = make_mock_response(200, OPENAI_MOCK_PAYLOAD, headers)
         session_cm = make_mock_session(resp_cm)
@@ -205,11 +220,45 @@ class TestOpenAIProbe(unittest.IsolatedAsyncioTestCase):
             status = await provider.probe()
 
         self.assertTrue(status.is_reachable)
+        # As of the data/presentation cleanup (April 2026), available_models
+        # contains clean identifiers — no padding, no [date] suffix.
         for expected_model in OPENAI_EXPECTED:
-            # Note: The OpenAI provider incorrectly formats the output string with creation dates 
-            # for the CLI. We verify the raw model ID is the root of the formatted string here.
-            self.assertTrue(any(m.startswith(expected_model) for m in status.available_models))
+            self.assertIn(expected_model, status.available_models)
         self.assertEqual(status.credit_remaining, 199)
+
+    async def test_model_metadata_populated(self):
+        """OpenAI probe exposes per-model `created_at` via model_metadata."""
+        resp_cm, _ = make_mock_response(200, OPENAI_MOCK_PAYLOAD)
+        session_cm = make_mock_session(resp_cm)
+
+        provider = OpenAIProvider()
+        with patch("aiohttp.ClientSession", return_value=session_cm):
+            status = await provider.probe()
+
+        # Every model in the response should have a metadata entry.
+        for expected_model in OPENAI_EXPECTED:
+            self.assertIn(expected_model, status.model_metadata)
+            entry = status.model_metadata[expected_model]
+            self.assertIn("created_at", entry)
+            # Format: YYYY-MM-DD
+            self.assertRegex(entry["created_at"], r"^\d{4}-\d{2}-\d{2}$")
+
+        # Spot-check a known mapping (2024-05-12 from OPENAI_CREATED).
+        self.assertEqual(
+            status.model_metadata["gpt-4o"]["created_at"],
+            "2024-05-12"
+        )
+
+    async def test_other_providers_have_empty_metadata(self):
+        """Gemini and Claude don't expose per-model dates, so model_metadata is {}."""
+        resp_cm, _ = make_mock_response(200, GEMINI_MOCK_PAYLOAD)
+        session_cm = make_mock_session(resp_cm)
+
+        provider = GeminiProvider()
+        with patch("aiohttp.ClientSession", return_value=session_cm):
+            status = await provider.probe()
+
+        self.assertEqual(status.model_metadata, {})
 
 
 # MARK: - ProbeScheduler tests

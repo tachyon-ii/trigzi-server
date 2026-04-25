@@ -1,10 +1,13 @@
-#!/usr/bin/env python3
-from __future__ import annotations
 #
 #  tests/test_enricher.py
 #
 #  Unit tests for core/enricher.py
 #  All LLM router calls, DB calls, and file I/O are mocked.
+#
+#  IMPORTANT: MOCK_ROUTER_RESPONSE mirrors what BaseProvider.analyse()
+#  actually returns: `result` is the raw flat-text string, and
+#  `parsed_blocks` carries the structured dict produced by
+#  SchemaValidator.extract_blocks().
 #
 
 import unittest
@@ -34,8 +37,30 @@ FOOD_RECORD = {
 
 NON_FOOD_RECORD = dict(FOOD_RECORD, category="Cleaning & Laundry", name="Dish Soap")
 
-MOCK_CLINICAL_PROFILE = {
-    "estimated_health_star": None,
+# What the LLM emits (raw flat text) per prompts/enrich_product.txt
+RAW_LLM_TEXT = (
+    "Estimated Health Star: 3.0\n"
+    "FODMAP Rating: 1\n"
+    "Coeliac Rating: 3\n"
+    "Histamine Rating: 0\n"
+    "Allergens: Gluten\n"
+    "Health Summary: Contains gluten; unsuitable for coeliacs.\n"
+    "---"
+)
+
+# What SchemaValidator.extract_blocks produces from RAW_LLM_TEXT
+PARSED_BLOCK = {
+    "estimated health star": "3.0",
+    "fodmap rating":         "1",
+    "coeliac rating":        "3",
+    "histamine rating":      "0",
+    "allergens":             "Gluten",
+    "health summary":        "Contains gluten; unsuitable for coeliacs.",
+}
+
+# The canonical clinical_profile after _coerce_clinical()
+EXPECTED_CLINICAL_PROFILE = {
+    "estimated_health_star": 3.0,
     "fodmap_rating":         1,
     "coeliac_rating":        3,
     "histamine_rating":      0,
@@ -43,12 +68,15 @@ MOCK_CLINICAL_PROFILE = {
     "health_summary":        "Contains gluten; unsuitable for coeliacs.",
 }
 
+# Shaped exactly like BaseProvider.analyse() return value
 MOCK_ROUTER_RESPONSE = {
-    "result":       MOCK_CLINICAL_PROFILE,
-    "model":        "gemini-2.5-flash",
-    "provider":     "Gemini",
-    "latency_ms":   410,
-    "was_fallback": False,
+    "result":        RAW_LLM_TEXT,
+    "parsed_blocks": [PARSED_BLOCK],
+    "model":         "gemini-2.5-flash",
+    "provider":      "Gemini",
+    "latency_ms":    410,
+    "raw_json":      RAW_LLM_TEXT,
+    "was_fallback":  False,
 }
 
 
@@ -74,7 +102,12 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
     async def test_returns_enriched_record(self):
         result, _ = await self._run_enrich(FOOD_RECORD)
         self.assertIsNotNone(result.get("clinical_profile"))
-        self.assertEqual(result["clinical_profile"], MOCK_CLINICAL_PROFILE)
+        self.assertEqual(result["clinical_profile"], EXPECTED_CLINICAL_PROFILE)
+
+    async def test_clinical_profile_is_a_dict_not_a_string(self):
+        """Regression: pre-fix this assigned the raw flat-text string."""
+        result, _ = await self._run_enrich(FOOD_RECORD)
+        self.assertIsInstance(result["clinical_profile"], dict)
 
     async def test_sets_enrichment_llm_model(self):
         result, _ = await self._run_enrich(FOOD_RECORD)
@@ -85,6 +118,13 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
         payload = mock.call_args.kwargs["payload"]
         self.assertIn("product", payload)
         self.assertEqual(payload["product"]["gtin"], FOOD_RECORD["gtin"])
+
+    async def test_passes_expected_keys_to_router(self):
+        """Regression: enrich() must declare expected_keys so BaseProvider parses."""
+        _, mock = await self._run_enrich(FOOD_RECORD)
+        kwargs = mock.call_args.kwargs
+        self.assertIn("expected_keys", kwargs)
+        self.assertIn("fodmap rating", kwargs["expected_keys"])
 
     async def test_calls_get_or_create_enrichment(self):
         from core.enricher import enrich, PROMPT_VER
@@ -162,6 +202,22 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
 
         queue_mock.assert_not_called()
 
+    async def test_empty_parsed_blocks_treated_as_failure(self):
+        """If router returns no parsed_blocks, enrichment is treated as failure."""
+        from core.enricher import enrich
+
+        empty_response = dict(MOCK_ROUTER_RESPONSE, parsed_blocks=[])
+        save_mock = AsyncMock()
+        with patch("core.enricher.router.analyse", AsyncMock(return_value=empty_response)), \
+             patch("core.enricher.log_scan"), \
+             patch("core.enricher._queue_for_validation"), \
+             patch("core.enricher._off.save", save_mock):
+            result = await enrich(FOOD_RECORD)
+
+        # No clinical_profile set, _enrichment_llm gets the model name (no exception was raised)
+        # so we end up in the else branch:
+        self.assertEqual(result["_enrichment_llm"], "FAILED")
+
 
 # ---------------------------------------------------------------------------
 # enrich() -- non-food products
@@ -208,6 +264,51 @@ class TestEnrichNonFood(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["_enrichment_llm"], "NOP")
 
+
+# ---------------------------------------------------------------------------
+# _coerce_clinical() -- type coercion
+# ---------------------------------------------------------------------------
+
+class TestCoerceClinical(unittest.TestCase):
+
+    def test_normalises_keys_to_snake_case(self):
+        from core.enricher import _coerce_clinical
+        out = _coerce_clinical(PARSED_BLOCK)
+        self.assertEqual(set(out.keys()), set(EXPECTED_CLINICAL_PROFILE.keys()))
+
+    def test_ratings_coerced_to_int(self):
+        from core.enricher import _coerce_clinical
+        out = _coerce_clinical(PARSED_BLOCK)
+        self.assertIsInstance(out["fodmap_rating"], int)
+        self.assertEqual(out["coeliac_rating"], 3)
+
+    def test_invalid_rating_falls_back_to_minus_one(self):
+        from core.enricher import _coerce_clinical
+        block = dict(PARSED_BLOCK, **{"fodmap rating": "garbage"})
+        self.assertEqual(_coerce_clinical(block)["fodmap_rating"], -1)
+
+    def test_health_star_coerced_to_float(self):
+        from core.enricher import _coerce_clinical
+        out = _coerce_clinical(PARSED_BLOCK)
+        self.assertIsInstance(out["estimated_health_star"], float)
+
+    def test_health_star_null_string_becomes_none(self):
+        from core.enricher import _coerce_clinical
+        block = dict(PARSED_BLOCK, **{"estimated health star": "null"})
+        self.assertIsNone(_coerce_clinical(block)["estimated_health_star"])
+
+    def test_allergens_split_to_list(self):
+        from core.enricher import _coerce_clinical
+        block = dict(PARSED_BLOCK, allergens="Milk, Soy, Wheat")
+        self.assertEqual(_coerce_clinical(block)["allergen_warnings"],
+                         ["Milk", "Soy", "Wheat"])
+
+    def test_empty_allergens_becomes_empty_list(self):
+        from core.enricher import _coerce_clinical
+        block = dict(PARSED_BLOCK, allergens="")
+        self.assertEqual(_coerce_clinical(block)["allergen_warnings"], [])
+
+
 # ---------------------------------------------------------------------------
 # _queue_for_validation_sync() -- isolated
 # ---------------------------------------------------------------------------
@@ -235,6 +336,7 @@ class TestQueueForValidation(unittest.TestCase):
         with patch("builtins.open", side_effect=OSError("disk full")), \
              patch("os.makedirs"):
             _queue_for_validation_sync(FOOD_RECORD)  # must not raise
+
 
 if __name__ == "__main__":
     unittest.main()

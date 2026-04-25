@@ -33,7 +33,32 @@ NON_FOOD_CATEGORIES = {
     "Tobacco",
 }
 
+# Keys emitted by prompts/enrich_product.txt -> [OUTPUT] block,
+# lower-cased and with spaces->underscores to match SchemaValidator output.
+# Source headers in the prompt are: "Estimated Health Star", "FODMAP Rating",
+# "Coeliac Rating", "Histamine Rating", "Allergens", "Health Summary".
+# extract_blocks lowercases and preserves spaces, so we accept both forms
+# and normalise on the way out.
+_PROMPT_KEYS_RAW = [
+    "estimated health star",
+    "fodmap rating",
+    "coeliac rating",
+    "histamine rating",
+    "allergens",
+    "health summary",
+]
+
+_KEY_RENAME = {
+    "estimated health star": "estimated_health_star",
+    "fodmap rating":         "fodmap_rating",
+    "coeliac rating":        "coeliac_rating",
+    "histamine rating":      "histamine_rating",
+    "allergens":             "allergen_warnings",
+    "health summary":        "health_summary",
+}
+
 _off = OFFLookup()
+
 
 def _nop_profile() -> dict:
     return {
@@ -45,6 +70,44 @@ def _nop_profile() -> dict:
         "health_summary":        "Non-food item. No clinical gut health profile applies."
     }
 
+
+def _coerce_clinical(block: dict) -> dict:
+    """Normalise a raw flat-text block into the canonical clinical_profile dict.
+
+    - Renames space-keys to snake_case (e.g. "fodmap rating" -> "fodmap_rating")
+    - Coerces numeric ratings to int (-1 on parse failure)
+    - Coerces estimated health star to float or None
+    - Splits the comma-separated allergens string into a list
+    """
+    out: dict = {}
+    for raw_key in _PROMPT_KEYS_RAW:
+        target = _KEY_RENAME[raw_key]
+        value  = block.get(raw_key, "")
+
+        if target == "estimated_health_star":
+            try:
+                out[target] = float(value) if value not in ("", "null", "None") else None
+            except (TypeError, ValueError):
+                out[target] = None
+
+        elif target in ("fodmap_rating", "coeliac_rating", "histamine_rating"):
+            try:
+                out[target] = int(float(value))
+            except (TypeError, ValueError):
+                out[target] = -1
+
+        elif target == "allergen_warnings":
+            if isinstance(value, list):
+                out[target] = [str(v).strip() for v in value if str(v).strip()]
+            else:
+                out[target] = [t.strip() for t in str(value).split(",") if t.strip()]
+
+        else:  # health_summary
+            out[target] = str(value).strip() or ""
+
+    return out
+
+
 def _queue_for_validation_sync(record: dict) -> None:
     try:
         os.makedirs(os.path.dirname(VALIDATE_JSONL), exist_ok=True)
@@ -53,17 +116,19 @@ def _queue_for_validation_sync(record: dict) -> None:
     except Exception as e:
         print(f"  [!] validate queue write failed: {e}")
 
+
 def _queue_for_validation(record: dict) -> None:
     asyncio.create_task(asyncio.to_thread(_queue_for_validation_sync, record))
 
+
 async def enrich(record: dict) -> dict:
-    """
-    Enrich a raw product record with a clinical profile.
+    """Enrich a raw product record with a clinical profile.
+
     Writes enrichment_id FK back to the products table.
     """
     enriched     = dict(record)
     llm_model    = "NOP"
-    profile_data = None
+    profile_data: Optional[dict] = None
     prompt_text  = ""
 
     if record.get("category") in NON_FOOD_CATEGORIES:
@@ -86,10 +151,20 @@ async def enrich(record: dict) -> dict:
                 model_strings = _cfg["models"],
                 optimize      = _cfg["optimize"],
                 timeout       = _cfg["timeout"],
+                expected_keys = _PROMPT_KEYS_RAW,           # <-- NEW
             )
-        
-            profile_data = response.get("result")
-            llm_model    = response.get("model", "router")
+
+            llm_model = response.get("model", "router")
+
+            blocks = response.get("parsed_blocks") or []
+            if blocks:
+                profile_data = _coerce_clinical(blocks[0])
+            else:
+                # Should not happen — BaseProvider raises decode_failed when
+                # expected_keys are set and no blocks are extracted — but be
+                # defensive in case the contract is ever loosened.
+                print("  [!] Enrichment: no parsed blocks in router response.")
+
         except Exception as e:
             print(f"  [!] Enrichment failed: {e}")
             llm_model = "FAILED"
@@ -113,12 +188,13 @@ async def enrich(record: dict) -> dict:
 
     return enriched
 
+
 async def patch_nutrition(gtin: str, nutrition_data: dict) -> bool:
     """Update a product's nutrition data directly in the database."""
     record = await _off.get(gtin)
     if record:
         record["nutrition_100g"] = nutrition_data
-        # lookup.save handles preserving the existing enrichment_id
+        # _off.save handles preserving the existing enrichment_id
         await _off.save(record)
         return True
     return False
