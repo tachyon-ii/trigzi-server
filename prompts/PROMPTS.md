@@ -1,3 +1,4 @@
+Markdown
 # Trigzi Prompt Engineering Specification
 
 This document defines the architectural standards for all LLM prompts in the Trigzi backend. 
@@ -10,6 +11,7 @@ Prompts in this system are not just natural language instructions; they act as s
 * **Fail-Closed Validation:** The LLM router acts as a "dumb pipe." It returns raw strings. A dedicated validation layer intercepts the response and enforces structural integrity via Regex before it reaches the application layer.
 * **Zero Interpolation Collisions:** Python's `.format()` engine is used to inject variables at runtime. To prevent `KeyError` crashes, all prompt instructions must use angle brackets `< >` for placeholders, never curly braces `{ }`.
 * **One-Shot Anchoring:** LLMs struggle with negative constraints ("DO NOT use Markdown"). Every prompt MUST include an `[EXAMPLE]` block demonstrating the perfect output format to force adherence.
+* **The Validation Gate:** To prevent malicious compliance on garbage OCR/image data, extraction prompts must force the LLM to classify the payload's validity *before* extracting data. The first key in the `[OUTPUT]` block must be `Valid_Input: <true|false>`. The Python layer uses this boolean to gracefully 422 bad requests without relying on brittle, hardcoded semantic checks.
 
 ## 2. Standard Prompt Anatomy
 
@@ -35,12 +37,14 @@ The `SchemaValidator` uses strict Regex (`r'^\[OUTPUT\][\s\S]*?^---'`) to read t
 ### Example (Menu Extraction)
 ```text
 [EXAMPLE]
+Valid_Input: true
 Dish: Pad Thai
 Listed: rice noodles, tofu, egg, bean sprouts, peanuts
 Suspected: fish sauce, palm sugar, tamarind paste, garlic
 ---
 
 [OUTPUT]
+Valid_Input: <true|false>
 Dish: <Name of Dish>
 Listed: <comma separated list>
 Suspected: <comma separated list>
@@ -48,7 +52,8 @@ Suspected: <comma separated list>
 
 ---
 
-### `prompts/analyse_menu.txt`
+
+### 2. `prompts/analyse_menu.txt`
 
 ```text
 [ACT AS]
@@ -58,21 +63,22 @@ A master chef.
 Analyze OCR text from a restaurant menu.
 
 [INSTRUCTIONS]
-1. Identify the distinct dishes/menu items.
-2. For each dish, output a strict text block using EXACTLY the keys below.
-3. 'Dish' should be the name of the dish.
-4. 'Listed' should be the ingredients explicitly written on the menu.
-5. 'Suspected' should be invisible bases (e.g., garlic, dairy, fish sauce, seed oils) typical for this dish.
-6. Separate each dish with exactly three dashes.
-7. Plaintext ONLY - DO NOT use JSON or MARKDOWN formatting.
+1. First, evaluate if the provided text is actually a restaurant menu.
+2. If it is NOT a menu (e.g., a novel, random text, or code), set 'Valid_Input' to false and leave the rest blank.
+3. If it IS a menu, set 'Valid_Input' to true and identify the distinct dishes.
+4. For each dish, output a strict text block using EXACTLY the keys below.
+5. Separate each dish with exactly three dashes.
+6. Plaintext ONLY - DO NOT use JSON or MARKDOWN formatting.
 
 [EXAMPLE]
+Valid_Input: true
 Dish: Pad Thai
 Listed: rice noodles, tofu, egg, bean sprouts, peanuts
 Suspected: fish sauce, palm sugar, tamarind paste, garlic
 ---
 
 [OUTPUT]
+Valid_Input: <true|false>
 Dish: <Name of Dish>
 Listed: <comma separated list>
 Suspected: <comma separated list>

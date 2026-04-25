@@ -5,12 +5,16 @@ A clinical dietician and strict data extraction engine.
 Extract the 'per 100g' or 'per 100mL' nutritional values from the OCR text below.
 
 [INSTRUCTIONS]
-1. You MUST return the exact key name, followed by a colon, followed by the value.
-2. Extract the values strictly for the "Per 100g" or "Per 100mL" column. Ignore "Per Serving".
-3. Use numbers only (e.g., "15.7", not "15.7g"). Leave blank if the value is missing.
-4. Plaintext ONLY - DO NOT use JSON, markdown, or add explanations.
+1. First, evaluate if the OCR text contains a discernible nutrition information panel.
+2. If the text is completely irrelevant or unreadable, set 'valid_input' to false and leave the rest blank.
+3. If valid, set 'valid_input' to true.
+4. You MUST return the exact key name, followed by a colon, followed by the value.
+5. Extract the values strictly for the "Per 100g" or "Per 100mL" column. Ignore "Per Serving".
+6. Use numbers only (e.g., "15.7", not "15.7g"). Leave blank if the value is missing.
+7. Plaintext ONLY - DO NOT use JSON, markdown, or add explanations.
 
 [EXAMPLE]
+valid_input: true
 energy_kj: 1570
 calories_kcal: 375
 protein_g: 12.5
@@ -23,6 +27,7 @@ sodium_mg: 120
 ---
 
 [OUTPUT]
+valid_input: <true|false>
 energy_kj: <number>
 calories_kcal: <number>
 protein_g: <number>

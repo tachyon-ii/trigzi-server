@@ -53,27 +53,15 @@ def get_task_payload_and_prompt(task, content):
         return {"prompt": prompt}, prompt
 
     elif task == "chat_emoji":
-        # For the emoji micro-inference, the fixture is just the raw text string to analyse
         prompt = SkillsLibrary.chat_emoji_prompt(text=content.strip())
         return {"prompt": prompt}, prompt
 
-    elif task == "enrich_product":
-        system_prompt = (
-            "You are a strictly clinical dietary analysis engine. "
-            "Analyze the provided product JSON for hidden allergens and dietary risks. "
-            "Output your analysis strictly in flat JSON format."
-        )
-        user_prompt = f"[PRODUCT DATA]\n{content}\n\n[OUTPUT FORMAT]\nReturn strictly JSON."
-        return {"prompt": f"{system_prompt}\n\n{user_prompt}"}, user_prompt
-
     elif task == "chat_sigmund":
         data = json.loads(content)
-        
         ctx_str = (
             f"Dietary Profile: {json.dumps(data.get('system_context', {}).get('dietary_profile', {}))}\n"
             f"Active Menu Context: {json.dumps(data.get('system_context', {}).get('current_menu', []))}"
         )
-        
         hist_str = ""
         for msg in data.get("history", []):
             role = "User" if msg.get("role") == "user" else "Trigzi"
@@ -86,11 +74,38 @@ def get_task_payload_and_prompt(task, content):
         )
         return {"prompt": prompt}, prompt
 
+    elif task == "enrich_product":
+        # Note: This is an older legacy prompt structure, keeping it intact for existing tests.
+        system_prompt = (
+            "You are a strictly clinical dietary analysis engine. "
+            "Analyze the provided product JSON for hidden allergens and dietary risks. "
+            "Output your analysis strictly in flat JSON format."
+        )
+        user_prompt = f"[PRODUCT DATA]\n{content}\n\n[OUTPUT FORMAT]\nReturn strictly JSON."
+        return {"prompt": f"{system_prompt}\n\n{user_prompt}"}, user_prompt
+
     elif task == "enrich_nutrition":
-        # The content is just the raw OCR text from the fixture file
         prompt = SkillsLibrary.enrich_nutrition_prompt(ocr_text=content.strip())
-        # The payload format expects the {"prompt": ...} wrapper for the RequestFilters
         return {"prompt": prompt}, prompt
+
+    # --- NEW BRANCHES ---
+    elif task == "analyse_menu":
+        prompt = SkillsLibrary.analyse_menu_prompt(content.strip())
+        return {"menu_text": content.strip()}, prompt
+        
+    elif task == "analyse_meal":
+        data = json.loads(content)
+        profile_str = json.dumps(data.get("profile", {}))
+        image_b64 = data.get("image", "")
+        prompt = SkillsLibrary.analyse_food_image_prompt(profile_str)
+        return {"image_base64": image_b64}, prompt
+        
+    elif task == "analyse_product":
+        # Usually passed as JSON containing 'text_front' and 'text_nutrition'
+        data = json.loads(content)
+        combined = f"Front label:\n{data.get('text_front', '')}\n\nNutrition/Ingredients:\n{data.get('text_nutrition', '')}"
+        prompt = SkillsLibrary.analyse_text_prompt(combined, "")
+        return {"text": combined}, prompt
 
     raise ValueError(f"Payload builder not implemented for task: '{task}'")
 

@@ -1,12 +1,31 @@
-# core/llm/providers/base.py
+#!/usr/bin/env python3
+from __future__ import annotations
+"""
+=============================================================================
+Module:        Base LLM Provider
+Location:      core/llm/providers/base.py
+Description:   Abstract base class and execution harness for LLM providers.
+               Enforces a unified interface for API request formatting, HTTP
+               transport, and response normalization across OpenAI, Claude, 
+               and Gemini.
+               
+               Architecture Note:
+               This class intercepts raw HTTP responses and delegates strict
+               parsing to the SchemaValidator. If a provider hallucinates or
+               fails to return the expected schema, this layer raises an
+               LLMError.decode_failed, which triggers the Router to safely 
+               failover to the next model in the hierarchy.
+=============================================================================
+"""
 
 import asyncio
 import aiohttp
 import time
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from ..errors import LLMError
 from ..skills import SkillsLibrary
 from ..filters import RequestFilter, ResponseFilter
+from ..validator import SchemaValidator
 
 
 class BaseProvider:
@@ -46,7 +65,8 @@ class BaseProvider:
         payload_data: Dict[str, Any],
         profile: str,
         model_tag: str,
-        timeout_s: float = 30.0
+        timeout_s: float = 30.0,
+        expected_keys: Optional[List[str]] = None
     ) -> Dict[str, Any]:
 
         tag      = model_tag if model_tag else self.default_model
@@ -55,17 +75,23 @@ class BaseProvider:
         for attempt in range(self.max_retries + 1):
             if attempt > 0:
                 await asyncio.sleep(self.retry_delay)
-                print(f"♻️ [{self.provider_name}] Retry {attempt}/{self.max_retries}")
+                print(f"🎶️ [{self.provider_name}] Retry {attempt}/{self.max_retries}")
 
             try:
                 start_time  = time.time()
                 raw_string  = await self._perform_request(payload_data, profile, tag, timeout_s)
                 latency_ms  = int((time.time() - start_time) * 1000)
 
-                # ARCHITECTURE UPDATE: The router is now a dumb pipe.
-                # No JSON decoding happens here. It just returns the raw string.
+                # TRIGGER FAILOVER IF SCHEMA EXTRACTION FAILS
+                parsed_blocks = []
+                if expected_keys:
+                    parsed_blocks = SchemaValidator.extract_blocks(raw_string, expected_keys)
+                    if not parsed_blocks:
+                        raise LLMError.decode_failed(self.provider_name, raw=raw_string)
+
                 return {
                     "result":       raw_string,
+                    "parsed_blocks": parsed_blocks,
                     "model":        tag,
                     "provider":     self.provider_name,
                     "latency_ms":   latency_ms,
@@ -80,12 +106,10 @@ class BaseProvider:
                 
                 print(f"⚠️ [{self.provider_name}] Attempt {attempt + 1} failed: {err}")
                 
-                # --- INJECT RAW DUMP HERE ---
                 if err.raw_response:
                     print(f"🔻 --- RAW UNREADABLE RESPONSE [{self.provider_name}] --- 🔻")
                     print(err.raw_response)
                     print(f"🔺 {'-' * 40} 🔺")
-                # ----------------------------
 
         raise last_err
 
@@ -108,11 +132,10 @@ class BaseProvider:
 
         elif "product" in payload_data:
             prompt  = (payload_data.get("prompt")
-                       or SkillsLibrary.enrich_product_prompt(payload_data["product"]))
+                        or SkillsLibrary.enrich_product_prompt(payload_data["product"]))
             payload = self.request_filter.build_text_payload(prompt, model_tag)
 
         elif "menu_text" in payload_data:
-            # We don't pass the profile into this prompt
             prompt  = SkillsLibrary.analyse_menu_prompt(payload_data["menu_text"])
             payload = self.request_filter.build_text_payload(prompt, model_tag)
 
@@ -132,22 +155,7 @@ class BaseProvider:
 
         headers = self.headers()
         headers["Content-Type"] = "application/json"
-        # --- DEBUG WIRE INJECTION ---
-        import json
-        print(f"\n{'='*60}")
-        print(f"📡 [DEBUG] ROUTING TO: {self.provider_name} ({model_tag})")
-        print(f"📦 [DEBUG] HEADERS:")
-        for k, v in headers.items():
-            # Mask API keys so you can safely paste the logs
-            if "Bearer" in str(v):
-                v = str(v)[:15] + "...[MASKED]"
-            if "x-api-key" in str(k).lower() or "key" in str(k).lower():
-                v = str(v)[:8] + "...[MASKED]"
-            print(f"   {k}: {v}")
-        print(f"📄 [DEBUG] FULL PAYLOAD:")
-        print(json.dumps(payload, indent=2))
-        print(f"{'='*60}\n")
-        # ----------------------------
+        
         timeout = aiohttp.ClientTimeout(total=timeout_s)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:

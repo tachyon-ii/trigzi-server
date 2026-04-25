@@ -1,0 +1,345 @@
+{
+  "endpoints": [
+    {
+      "name": "Product Lookup (Valid)",
+      "route": "/api/v1/product/9310273001736",
+      "method": "GET",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": null
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": null
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 200,
+      "retval_schema": {
+        "status": "str",
+        "product": "dict"
+      }
+    },
+    {
+      "name": "Product Lookup (Invalid)",
+      "route": "/api/v1/product/123",
+      "method": "GET",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": null
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": null
+      },
+      "expected_status_valid": 400,
+      "expected_status_invalid": 400,
+      "retval_schema": null
+    },
+    {
+      "name": "Analyse Product (Unprocessable OCR)",
+      "route": "/api/v1/analyse/product",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "gtin": "0000000000000",
+          "text_front": "Garbage Front",
+          "text_nutrition": "Garbage Nutrition"
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 422,
+      "expected_status_invalid": 400,
+      "retval_schema": {
+        "error": "str"
+      }
+    },
+    {
+      "name": "Analyse Product (Valid)",
+      "route": "/api/v1/analyse/product",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "gtin": "0000000000000",
+          "text_front": "Arnott's Choc Chip Cookies",
+          "text_nutrition": "Ingredients: wheat flour, chocolate chips, sugar, vegetable oil, salt."
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 400,
+      "retval_schema": {
+        "status": "str",
+        "result": "dict"
+      }
+    },
+    {
+      "name": "Analyse Meal (Unprocessable Image)",
+      "route": "/api/v1/analyse/meal",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "image": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+          "profile": {"rings": []}
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 422,
+      "expected_status_invalid": 400,
+      "retval_schema": {
+        "error": "str"
+      }
+    },
+    {
+      "name": "Analyse Meal (Valid)",
+      "route": "/api/v1/analyse/meal",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "image": "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",
+          "profile": {"rings": []}
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 400,
+      "retval_schema": {
+        "status": "str",
+        "result": "dict"
+      }
+    },
+    {
+      "name": "Analyse Menu (Unprocessable OCR)",
+      "route": "/api/v1/analyse/menu",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "text": "Call me Ishmael. Some years ago—never mind how long precisely—having little or no money in my purse, and nothing particular to interest me on shore, I thought I would sail about a little and see the watery part of the world."
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 422,
+      "expected_status_invalid": 400,
+      "retval_schema": {
+        "error": "str"
+      }
+    },
+    {
+      "name": "Analyse Menu (Valid)",
+      "route": "/api/v1/analyse/menu",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "text": "1x Margherita Pizza\n1x Pad Thai"
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 400,
+      "retval_schema": {
+        "status": "str",
+        "result": "dict"
+      }
+    },
+    {
+      "name": "Enrich Nutrition (Unprocessable OCR)",
+      "route": "/api/v1/enrich/nutrition",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "gtin": "0000000000000",
+          "ocr_text": "Garbage Text"
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 422,
+      "expected_status_invalid": 400,
+      "retval_schema": {
+        "error": "str"
+      }
+    },
+    {
+      "name": "Enrich Nutrition (Valid)",
+      "route": "/api/v1/enrich/nutrition",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "gtin": "0000000000000",
+          "ocr_text": "Energy 1500kJ, Protein 10g"
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 400,
+      "retval_schema": {
+        "energy_kj": "float"
+      }
+    },
+    {
+      "name": "Chat Assistant Stream",
+      "route": "/api/v1/chat/stream",
+      "method": "POST",
+      "type": "sse",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "message": "Is this safe?",
+          "history": [],
+          "system_context": {}
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 400,
+      "retval_schema": null
+    },
+    {
+      "name": "Chat Emoji Inference",
+      "route": "/api/v1/chat/emoji",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "text": "This contains gluten and dairy."
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 400,
+      "retval_schema": {
+        "status": "str",
+        "emoji": "str"
+      }
+    },
+    {
+      "name": "Onboarding Stream",
+      "route": "/api/v1/chat/onboarding",
+      "method": "POST",
+      "type": "sse",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "message": "Hi, I'm Alex",
+          "fallback_name": "Zesty Koala"
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 400,
+      "retval_schema": null
+    },
+    {
+      "name": "Sigmund Intercept",
+      "route": "/api/v1/chat/sigmund",
+      "method": "POST",
+      "type": "sse",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "message": "I'm stressed about this diet.",
+          "history": [],
+          "system_context": {}
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": {}
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 400,
+      "retval_schema": null
+    },
+    {
+      "name": "System Messages",
+      "route": "/api/v1/messages",
+      "method": "GET",
+      "type": "rest",
+      "valid_request": {
+        "headers": {
+          "Authorization": "Bearer test",
+          "X-Device-ID": "probe-uuid-0001"
+        },
+        "json": null
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": null
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 401,
+      "retval_schema": "list"
+    },
+    {
+      "name": "Telemetry Unmatched",
+      "route": "/api/v1/telemetry/unmatched",
+      "method": "POST",
+      "type": "rest",
+      "valid_request": {
+        "headers": {},
+        "json": {
+          "term": "9310077217814"
+        }
+      },
+      "invalid_request": {
+        "headers": {},
+        "json": null
+      },
+      "expected_status_valid": 200,
+      "expected_status_invalid": 200,
+      "retval_schema": {
+        "status": "str"
+      }
+    }
+  ]
+}

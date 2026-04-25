@@ -120,8 +120,8 @@ async def analyse_product_route():
 
     result = await analyse_product(gtin=gtin, text_front=text_front, text_nutrition=text_nutrition)
     if not result:
-        logger.error(f"Analysis failed for product {gtin}")
-        return jsonify({"error": "Analysis failed."}), 500
+        logger.warning(f"Analysis failed for product {gtin} - Unprocessable OCR.")
+        return jsonify({"error": "Could not extract product data. Please check scan quality."}), 422
 
     return jsonify({"status": "ok", "result": result}), 200
 
@@ -134,7 +134,12 @@ async def analyse_meal_route():
     image = data.get('image', '')
     profile = data.get('profile', {})
 
-    if isinstance(image, str): image = image.strip()
+    if isinstance(image, str): 
+        image = image.strip()
+        # Defensively strip Data URI prefix if the client includes it
+        if "," in image and image.startswith("data:image"):
+            image = image.split(",", 1)[1]
+            
     if not image:
         return jsonify({"error": "Missing image."}), 400
 
@@ -144,8 +149,8 @@ async def analyse_meal_route():
 
     result = await analyse_meal(image=image, profile=profile_str)
     if not result:
-        logger.error("Analysis failed for meal photo")
-        return jsonify({"error": "Analysis failed."}), 500
+        logger.warning("Analysis failed for meal photo - Unprocessable Image.")
+        return jsonify({"error": "Could not analyze meal. Please ensure the image is clear."}), 422
 
     return jsonify({"status": "ok", "result": result}), 200
 
@@ -167,12 +172,12 @@ async def analyse_menu_route():
 
     result = await analyse_menu(text=text)
     if not result:
-        logger.error("Analysis failed for menu")
-        return jsonify({"error": "Analysis failed."}), 500
+        logger.warning("Analysis failed for menu - Unprocessable OCR.")
+        return jsonify({"error": "Could not extract menu items. Please ensure the text is clear."}), 422
 
     return jsonify({"status": "ok", "result": result}), 200
 
-@app.post("/api/v1/chat/stream")
+@app.route('/api/v1/chat/stream', methods=['POST'])
 async def chat_stream_endpoint():
     try:
         data = await request.get_json() 
@@ -293,7 +298,7 @@ async def chat_onboarding_route():
         'Connection':        'keep-alive',
     })
 
-@app.post("/api/v1/chat/sigmund")
+@app.route('/api/v1/chat/sigmund', methods=['POST'])
 async def chat_sigmund_endpoint():
     try:
         data = await request.get_json() 
@@ -357,8 +362,8 @@ async def enrich_nutrition_route():
     nutrition_data = await enrich_nutrition(gtin, ocr_text)
     
     if not nutrition_data:
-        logger.error(f"Nutrition extraction failed for GTIN: {gtin}")
-        return jsonify({"error": "Failed to parse nutrition data."}), 500
+        logger.warning(f"Nutrition extraction failed for GTIN: {gtin} - Unprocessable OCR.")
+        return jsonify({"error": "Failed to parse nutrition data. Please ensure the scan is clear."}), 422
 
     patched = await patch_nutrition(gtin, nutrition_data)
     if patched:

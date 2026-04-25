@@ -1,12 +1,12 @@
 # Trigzi Server Setup & Deployment Guide
 
-Architecture: **nginx** handles SSL termination and static assets, forwarding `/api/` to **Gunicorn** which manages **Flask** workers inside a Python virtual environment on RHEL/CentOS.
+Architecture: **nginx** handles SSL termination and static assets, forwarding `/api/` to **Hypercorn** which manages the async **Quart** workers inside a Python virtual environment on RHEL/Rocky Linux.
 
 ---
 
 ## Prerequisites
 
-- RHEL / CentOS / Rocky Linux server
+- RHEL / CentOS / Rocky Linux server (9.x recommended; 8.x requires the systemd note in §6)
 - DNS A-records for `trigzi.com` and `www.trigzi.com` pointing to server IP
 - Root or sudo privileges
 
@@ -15,7 +15,7 @@ Architecture: **nginx** handles SSL termination and static assets, forwarding `/
 ## 1. System Dependencies
 
 ```bash
-dnf install python3 python3-pip nginx certbot python3-certbot-nginx mysql-server -y
+dnf install python3 python3-pip nginx certbot python3-certbot-nginx mariadb-server -y
 ```
 
 ---
@@ -45,12 +45,13 @@ pip install -r requirements.txt
 
 ## 4. Environment Configuration
 
-All secrets and config live in `/etc/trigzi/env`. This file is loaded by systemd and by root's shell.
+All secrets and config live in `/etc/trigzi/env`. Each line uses bash `export` syntax so the same file can be sourced from a developer shell **and** consumed by systemd's `EnvironmentFile=` directive.
 
 ```bash
 mkdir -p /etc/trigzi
 cat > /etc/trigzi/env << 'EOF'
 export DB_HOST=localhost
+export DB_PORT=3306
 export DB_NAME=trigzi
 export DB_USER=trigzi
 export DB_PASS=<password>
@@ -61,7 +62,9 @@ EOF
 chmod 600 /etc/trigzi/env
 ```
 
-Add to `/root/.bashrc` so every `sudo su root` session is fully configured:
+> **API key env-var names are exact.** The provider modules read `GEMINI_API_KEY`, `CLAUDE_API_KEY`, and `OPENAI_API_KEY`. Do not substitute `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` — they will not be picked up.
+
+Add a `trigzi` shell function to `/root/.bashrc` so every root session gets a fully-loaded environment in one command:
 
 ```bash
 trigzi() {
@@ -72,12 +75,14 @@ trigzi() {
 }
 ```
 
+The `export` keywords inside `/etc/trigzi/env` make `set -a` redundant — sourcing alone is enough. (If you ever convert the env file to plain `KEY=value` lines for any reason, switch the function to `set -a; source /etc/trigzi/env; set +a` to compensate.)
+
 ---
 
 ## 5. Database
 
 ```bash
-# Create database and products table
+# Create database, schema (products + enrichments + sessions), and trigzi user
 ./setup/createdb trigzi <password>
 
 # Import Open Food Facts data
@@ -89,15 +94,17 @@ trigzi() {
     --input /data2000/enriched_products_normalised.jsonl --write
 ```
 
+The schema is documented in `README.md` — three tables: `products`, `enrichments`, `sessions`.
+
 ---
 
-## 6. Gunicorn / Systemd
+## 6. Hypercorn / Systemd
 
-Create `/etc/systemd/system/trigzi_api.service`:
+Create the base unit at `/etc/systemd/system/trigzi_api.service`:
 
 ```ini
 [Unit]
-Description=Gunicorn instance to serve TRIGZI API
+Description=Hypercorn instance to serve TRIGZI API
 After=network.target
 
 [Service]
@@ -105,18 +112,29 @@ User=root
 Group=nginx
 WorkingDirectory=/var/www/trigzi
 Environment="PATH=/var/www/trigzi/venv/bin"
-EnvironmentFile=/etc/trigzi/env
 
-ExecStart=/var/www/trigzi/venv/bin/gunicorn \
-    --workers 3 \
-    --bind 127.0.0.1:5000 \
-    -m 007 \
-    app:app
+ExecStart=/var/www/trigzi/venv/bin/python3 /var/www/trigzi/venv/bin/hypercorn --workers 3 --bind 127.0.0.1:5000 app:app
 
 [Install]
 WantedBy=multi-user.target
 ```
 
+Create the drop-in directory and override file so systemd loads `/etc/trigzi/env`:
+
+```bash
+mkdir -p /etc/systemd/system/trigzi_api.service.d/
+```
+
+`/etc/systemd/system/trigzi_api.service.d/override.conf`:
+```ini
+[Service]
+# systemd v246+ tolerates `export` prefix on each line of the env file
+EnvironmentFile=-/etc/trigzi/env
+```
+
+> **systemd version note:** `EnvironmentFile=` accepting `export` keywords requires systemd ≥ v246. Rocky/RHEL 9 ships systemd 252 — fine. RHEL/CentOS 8 ships systemd 239 — you must either keep an `export`-free copy of the env file for systemd, or upgrade.
+
+Reload and start:
 ```bash
 systemctl daemon-reload
 systemctl enable trigzi_api
@@ -161,8 +179,8 @@ server {
         proxy_read_timeout      60s;
     }
 
-    # Product lookup — SSE streaming, disable buffering
-    location /api/v1/product/ {
+    # SSE-bearing routes — disable buffering. Add new SSE routes here.
+    location ~ ^/api/v1/(product|chat|analyse)/ {
         proxy_pass              http://127.0.0.1:5000;
         proxy_set_header        Host $host;
         proxy_set_header        X-Real-IP $remote_addr;
@@ -187,9 +205,13 @@ server {
 }
 ```
 
+> The original config disabled buffering only on `/api/v1/product/`. Several other routes also stream SSE (`/api/v1/chat/stream`, `/chat/onboarding`, `/chat/sigmund`). The regex location block above covers all of them. If you prefer separate `location` blocks for clarity, replicate the buffering-off settings on each.
+
 ```bash
 nginx -t && systemctl reload nginx
 ```
+
+---
 
 ## 8. SSL
 
@@ -202,24 +224,31 @@ certbot --nginx -d trigzi.com -d www.trigzi.com
 ## 9. Operations
 
 ```bash
-# Deploy (bounce gunicorn + nginx)
+# Deploy (bounce hypercorn + nginx)
 ./deploy.sh
 
-# View logs
+# Tail application logs
 ./logs.sh
 
-# Application logs
+# Application logs (systemd journal)
 journalctl -u trigzi_api -n 50 -f
 
 # nginx logs
 tail -f /var/log/nginx/trigzi.access.log
 tail -f /var/log/nginx/trigzi.error.log
 
-# Run test suite
-./run_tests.sh
+# Quart application log
+tail -f /var/www/trigzi/logs/api.log
+
+# Run synthetic client probe (uses tests/api_manifest.json)
+./scripts/probe_client.py
+
+# Live API contract tests (uses tests/schemas/endpoints/*.json)
+python tests/test_api_contracts.py
 
 # Check LLM provider health
 ./scripts/probe_live.py all
+./scripts/probe_live.py gemini claude
 
 # Product acquisition queue
 sort logs/unmatched.log | uniq -c | sort -rn | head -50

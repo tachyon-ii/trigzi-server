@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-#
-#  core/analyser.py
-#
+"""
+=============================================================================
+Module:        LLM Analyser
+Location:      core/analyser.py
+Description:   Business logic layer for LLM interactions.
+               Orchestrates task-specific prompt construction, context
+               aggregation, and strict schema validation of LLM outputs.
+               
+               Architecture Note:
+               This layer receives raw strings from the LLM Router and 
+               processes them via the SchemaValidator. It enforces the 
+               backend's 'Death to JSON' flat-text data extraction policy 
+               before yielding parsed Python dictionaries back to the 
+               transport layer (app.py).
+=============================================================================
+"""
 
 import re
 import json
@@ -15,7 +28,6 @@ from core.llm.config import config as llm_config
 from core.llm.validator import SchemaValidator
 from core.personality import get_persona_instruction
 
-# Initialize the logger for this module
 logger = logging.getLogger(__name__)
 
 
@@ -39,14 +51,25 @@ async def analyse_product(
             timeout       = _cfg["timeout"],
         )
         
-        raw_result = response.get("result")
-        if not raw_result:
+        raw_text = str(response.get("result", ""))
+        
+        expected_keys = [
+            "valid_input", "item", "verdict", "summary", "warnings", "ingredients", "flagged", "reasoning"
+        ]
+        
+        blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
+        if not blocks:
             return None
-        return json.loads(raw_result)
+            
+        # The LLM Semantic Validation Gate
+        if str(blocks[0].get("valid_input", "")).lower() == "false":
+            logger.warning("LLM flagged product input data as invalid/irrelevant.")
+            return None
 
-    except json.JSONDecodeError as e:
-        logger.error(f" analyse_product JSON decode failed: {e}")
-        return None
+        # Clean the block before returning to the UI layer
+        blocks[0].pop("valid_input", None)
+        return blocks[0]
+
     except Exception as e:
         logger.error(f" analyse_product failed: {e}")
         return None
@@ -67,14 +90,24 @@ async def analyse_meal(image: str, profile: str) -> Optional[dict]:
             timeout       = _cfg["timeout"],
         )
         
-        raw_result = response.get("result")
-        if not raw_result:
+        raw_text = str(response.get("result", ""))
+        
+        expected_keys = [
+            "valid_input", "dish", "verdict", "summary", "warnings", "ingredients", "flagged", "reasoning"
+        ]
+        
+        blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
+        if not blocks:
             return None
-        return json.loads(raw_result)
+            
+        # The LLM Semantic Validation Gate
+        if str(blocks[0].get("valid_input", "")).lower() == "false":
+            logger.warning("LLM flagged meal image data as invalid/irrelevant.")
+            return None
 
-    except json.JSONDecodeError as e:
-        logger.error(f" analyse_meal JSON decode failed: {e}")
-        return None
+        blocks[0].pop("valid_input", None)
+        return blocks[0]
+
     except Exception as e:
         logger.error(f" analyse_meal failed: {e}")
         return None
@@ -90,7 +123,7 @@ async def analyse_menu(text: str) -> Optional[dict]:
     try:
         response = await router.analyse(
             payload       = {"menu_text": text},
-            profile       = "", # No profile needed for extraction
+            profile       = "", 
             model_strings = _cfg["models"],
             optimize      = _cfg["optimize"],
             timeout       = _cfg["timeout"],
@@ -103,9 +136,16 @@ async def analyse_menu(text: str) -> Optional[dict]:
         else:
             raw_text = str(raw_text)
 
-        # The Robust Parser (Leveraging multi-line regex validation)
-        expected_keys = ["dish", "listed", "suspected"]
+        expected_keys = ["valid_input", "dish", "listed", "suspected"]
         extracted_blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
+        
+        if not extracted_blocks:
+            return None
+            
+        # The LLM Semantic Validation Gate
+        if str(extracted_blocks[0].get("valid_input", "")).lower() == "false":
+            logger.warning("LLM flagged menu input data as invalid/irrelevant.")
+            return None
         
         dishes = []
         for block in extracted_blocks:
@@ -116,6 +156,9 @@ async def analyse_menu(text: str) -> Optional[dict]:
             }
             if dish_data["name"] != "Unknown":
                 dishes.append(dish_data)
+
+        if not dishes:
+            return None
 
         return {"type": "menu", "items": dishes}
 
@@ -145,15 +188,25 @@ async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
         raw_text = str(response.get("result", "")).strip()
         
         expected_keys = [
-            "energy_kj", "calories_kcal", "protein_g", "fat_total_g", 
+            "valid_input", "energy_kj", "calories_kcal", "protein_g", "fat_total_g", 
             "fat_saturated_g", "carbohydrates_g", "sugars_g", "fibre_g", "sodium_mg"
         ]
         
         blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
-        parsed = blocks[0] if blocks else {}
+        if not blocks:
+            return None
+            
+        # The LLM Semantic Validation Gate
+        if str(blocks[0].get("valid_input", "")).lower() == "false":
+            logger.warning("LLM flagged nutrition OCR data as invalid/irrelevant.")
+            return None
+            
+        parsed = blocks[0]
 
         final_nutrition = {}
         for key in expected_keys:
+            if key == "valid_input": continue
+            
             val = parsed.get(key, "")
             if val:
                 try:
@@ -171,7 +224,7 @@ async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Chat Pipeline (Pipelined for SSE Streaming)
+# Chat Pipeline
 # ---------------------------------------------------------------------------
 
 async def chat_assistant(system_context: dict, history: list, message: str, trigzi_nickname: str = "Trigzi") -> tuple[Optional[str], Optional[str]]:
@@ -179,7 +232,6 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
     if not message:
         return None, None
 
-    # Defensive type coercion
     if isinstance(system_context, str):
         try:
             system_context = json.loads(system_context)
@@ -190,7 +242,6 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
 
     persona_instruction = get_persona_instruction(system_context)
 
-    # Context Aggregation: Dietary Profile + Spatial/Temporal Environment
     ctx_parts = [
         f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}"
     ]
@@ -208,7 +259,6 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
         role = "User" if msg.get("role") == "user" else "Trigzi"
         hist_str += f"{role}: {msg.get('content', '')}\n"
 
-    # INJECT into prompt builder:
     prompt = SkillsLibrary.chat_assistant_prompt(
         system_context=ctx_str,
         history=hist_str,
@@ -217,7 +267,6 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
         persona_instruction=persona_instruction
     )
 
-    # DYNAMIC CONFIG ROUTING
     _cfg = llm_config.task_config("chat_assistant")
 
     try:
@@ -235,15 +284,13 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
             raw_text = raw_text[9:]
         raw_text = raw_text.strip(" \n-")
 
-        # =================================================================
-        # THE ACTION INTERCEPTOR (UI OVERRIDES)
-        # =================================================================
         action_command = None
         action_match = re.search(r'\[ACTION:\s*([^\]]+)\]', raw_text)
         
         if action_match:
             action_command = action_match.group(1).strip()
-            # Strip the tag from the text so the user never sees it
+            if action_command.upper() == "NONE":
+                action_command = None
             raw_text = re.sub(r'\[ACTION:\s*[^\]]+\]', '', raw_text).strip()
 
         return raw_text, action_command
@@ -259,7 +306,6 @@ async def chat_emoji(text: str) -> str:
         return ""
 
     prompt = SkillsLibrary.chat_emoji_prompt(text=text)
-
     _cfg = llm_config.task_config("chat_emoji")
 
     try:
@@ -371,7 +417,7 @@ async def sigmund_assistant(system_context: dict, history: list, message: str) -
             payload       = {"prompt": prompt},
             profile       = "", 
             model_strings = _cfg["models"], 
-            optimize      = "accuracy", # FORCE high-end model for EQ and safety
+            optimize      = "accuracy", 
             timeout       = _cfg.get("timeout", 15),
         )
         
