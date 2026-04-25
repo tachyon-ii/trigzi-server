@@ -277,7 +277,7 @@ class LLMProviderConfig:
  
         Usage:
             cfg = config.task_config("enrich")
-            response = await router.analyze(
+            response = await router.analyse(
                 payload       = ...,
                 profile       = ...,
                 model_strings = cfg["models"],

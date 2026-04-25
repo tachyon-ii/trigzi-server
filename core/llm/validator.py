@@ -87,3 +87,32 @@ class SchemaValidator:
                     return False
                     
         return True
+
+    @staticmethod
+    def extract_blocks(response_text: str, expected_keys: list[str]) -> list[dict]:
+        """
+        Safely extracts key-value pairs from flat-text blocks, handling multi-line values.
+        """
+        blocks = [b.strip() for b in response_text.split("---") if b.strip()]
+        parsed_blocks = []
+        
+        # Regex: Start of line, capturing group for key, colon, lazy capture for value, 
+        # lookahead for the next key, the block terminator, or end of string.
+        pattern = re.compile(
+            r'^(?P<key>[A-Za-z_ -]+):\s*(?P<value>.*?)(?=\n^[A-Za-z_ -]+:|\n^---|\Z)', 
+            re.MULTILINE | re.DOTALL
+        )
+        
+        expected_keys_lower = {k.lower() for k in expected_keys}
+        
+        for block in blocks:
+            parsed_data = {}
+            for match in pattern.finditer(block):
+                key = match.group('key').strip().lower()
+                if key in expected_keys_lower:
+                    parsed_data[key] = match.group('value').strip()
+            
+            if parsed_data:
+                parsed_blocks.append(parsed_data)
+                
+        return parsed_blocks

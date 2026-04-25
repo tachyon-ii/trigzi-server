@@ -53,7 +53,7 @@ def get_task_payload_and_prompt(task, content):
         return {"prompt": prompt}, prompt
 
     elif task == "chat_emoji":
-        # For the emoji micro-inference, the fixture is just the raw text string to analyze
+        # For the emoji micro-inference, the fixture is just the raw text string to analyse
         prompt = SkillsLibrary.chat_emoji_prompt(text=content.strip())
         return {"prompt": prompt}, prompt
 

@@ -35,7 +35,7 @@ Requires: Organization ID + key with billing permissions
 No standalone balance endpoint. All capacity data comes from
 response headers on every successful API call.
 
-Headers to extract in `BaseProvider.analyze()`:
+Headers to extract in `BaseProvider.analyse()`:
 
 | Header | Meaning |
 |--------|---------|
@@ -61,7 +61,7 @@ Headers to extract in `BaseProvider.analyze()`:
 
 Avoid polling billing APIs on every request. Use three layers:
 
-### Layer 1 — Response Interceptor (in BaseProvider.analyze)
+### Layer 1 — Response Interceptor (in BaseProvider.analyse)
 Capture rate-limit headers from every response and write to a
 centralised cache (SQLite / Redis). Zero added latency to the
 request path — fire-and-forget write.
@@ -81,9 +81,9 @@ request path — fire-and-forget write.
 
 ## Implementation Priorities for Trigzi
 
-1. **Immediate** — Extract Claude headers in `BaseProvider.analyze()`
+1. **Immediate** — Extract Claude headers in `BaseProvider.analyse()`
    and write to `LLMCallRecord`. Already partially wired via
-   `_extract_credit()` in `probe.py` — extend to analyze path.
+   `_extract_credit()` in `probe.py` — extend to analyse path.
 
 2. **Short term** — OpenAI credit_grants poller as a scheduled task.
    Runs hourly, writes to a `BillingSnapshot` SwiftData/SQLite record.

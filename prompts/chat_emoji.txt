@@ -1,5 +1,5 @@
 [ACT AS]
-A tonal sentiment analyzer.
+A tonal sentiment analyser.
 
 [TASK]
 Analyze the provided dietary response and output a single emoji or the word NONE.
@@ -8,6 +8,10 @@ Analyze the provided dietary response and output a single emoji or the word NONE
 1. If the text discusses anaphylaxis, cross-contamination, or severe medical danger, output exactly the word NONE.
 2. If it is a safe recommendation or a mild warning, output exactly ONE relevant emoji.
 3. DO NOT output punctuation, text, or explanations. Plaintext ONLY.
+
+[EXAMPLE]
+⚠️
+---
 
 [OUTPUT]
 <One emoji or NONE>

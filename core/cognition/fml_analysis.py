@@ -38,7 +38,7 @@ class FrontalMemoryLobe:
         self.PHASE_1_CLINICAL = 20
         self.PHASE_2_INNUENDO = 45
 
-    def analyze(self, baggage: CognitiveBaggage) -> FMLExecutionPlan:
+    def analyse(self, baggage: CognitiveBaggage) -> FMLExecutionPlan:
         """
         Processes the FML (Frontal Memory Lobe) analysis.
         AKA: Figures out how to handle the user's emotional state today.

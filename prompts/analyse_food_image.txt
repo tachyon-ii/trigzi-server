@@ -11,6 +11,16 @@ Analyze the attached image of a plated meal against the user's dietary profile.
 4. Evaluate the dish against the provided USER PROFILE to determine a verdict (Safe / Caution / Avoid).
 5. Plaintext ONLY. DO NOT use JSON or Markdown.
 
+[EXAMPLE]
+Dish: Spaghetti Carbonara
+Verdict: Avoid
+Summary: Contains dairy and likely garlic, violating your FODMAP ring.
+Warnings: High FODMAP, Dairy Allergy
+Ingredients: chicken, pasta, bacon, cream, egg, cheese
+Flagged: cream, cheese, garlic
+Reasoning: Carbonara traditionally relies heavily on dairy (cream/cheese) which triggers your dairy allergy. It also frequently uses garlic as a base, which is high FODMAP.
+---
+
 [OUTPUT]
 Dish: <Name of Dish>
 Verdict: <Safe|Caution|Avoid>

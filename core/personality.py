@@ -15,7 +15,7 @@ Description:   The way you ask an LLM to behave completely dictates how it
                1. Attitude Level (0, 1, 2) -> The Vibe (Clinical to Sassy)
                2. Experience Mode (0, 1, 2) -> The Audience (Kids to Advanced)
 
-               By decoupling this from the analyzer, we can infinitely expand
+               By decoupling this from the analyser, we can infinitely expand
                our personas without polluting the network orchestration layer.
 ==============================================================================
 """

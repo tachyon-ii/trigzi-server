@@ -15,6 +15,10 @@ De-escalate the user, validate their feelings of food-related guilt, anxiety, or
 7. Terminate the block with exactly three dashes.
 8. Plaintext ONLY - DO NOT use JSON or MARKDOWN formatting.
 
+[EXAMPLE]
+Response: I hear you. It's completely normal to feel overwhelmed after eating something unplanned. Please don't be hard on yourself.
+---
+
 [OUTPUT]
 Response: <Your empathetic response>
 ---

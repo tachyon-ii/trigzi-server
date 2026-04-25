@@ -64,7 +64,7 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
 
         router_mock = AsyncMock(return_value=router_response or MOCK_ROUTER_RESPONSE)
 
-        with patch("core.enricher.router.analyze",        router_mock), \
+        with patch("core.enricher.router.analyse",        router_mock), \
              patch("core.enricher.get_or_create_enrichment", return_value=enrichment_id), \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation"), \
@@ -89,7 +89,7 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
     async def test_calls_get_or_create_enrichment(self):
         from core.enricher import enrich, PROMPT_VER
 
-        with patch("core.enricher.router.analyze", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
+        with patch("core.enricher.router.analyse", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
              patch("core.enricher.get_or_create_enrichment", return_value=7) as mock_enrich_id, \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation"), \
@@ -106,7 +106,7 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
         from core.enricher import enrich
 
         save_mock = AsyncMock()
-        with patch("core.enricher.router.analyze", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
+        with patch("core.enricher.router.analyse", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
              patch("core.enricher.get_or_create_enrichment", return_value=42), \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation"), \
@@ -121,7 +121,7 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
         from core.enricher import enrich
 
         queue_mock = MagicMock()
-        with patch("core.enricher.router.analyze", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
+        with patch("core.enricher.router.analyse", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
              patch("core.enricher.get_or_create_enrichment", return_value=7), \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation", queue_mock), \
@@ -134,7 +134,7 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
         from core.enricher import enrich
 
         save_mock = AsyncMock()
-        with patch("core.enricher.router.analyze", AsyncMock(side_effect=Exception("LLM down"))), \
+        with patch("core.enricher.router.analyse", AsyncMock(side_effect=Exception("LLM down"))), \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation"), \
              patch("core.enricher._off.save", save_mock):
@@ -154,7 +154,7 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
         from core.enricher import enrich
 
         queue_mock = MagicMock()
-        with patch("core.enricher.router.analyze", AsyncMock(side_effect=Exception("down"))), \
+        with patch("core.enricher.router.analyse", AsyncMock(side_effect=Exception("down"))), \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation", queue_mock), \
              patch("core.enricher._off.save"):
@@ -173,7 +173,7 @@ class TestEnrichNonFood(unittest.IsolatedAsyncioTestCase):
         from core.enricher import enrich
 
         router_mock = AsyncMock()
-        with patch("core.enricher.router.analyze", router_mock), \
+        with patch("core.enricher.router.analyse", router_mock), \
              patch("core.enricher.get_or_create_enrichment", return_value=1), \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation"), \
@@ -185,7 +185,7 @@ class TestEnrichNonFood(unittest.IsolatedAsyncioTestCase):
     async def test_non_food_sets_nop_profile(self):
         from core.enricher import enrich
 
-        with patch("core.enricher.router.analyze", AsyncMock()), \
+        with patch("core.enricher.router.analyse", AsyncMock()), \
              patch("core.enricher.get_or_create_enrichment", return_value=1), \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation"), \
@@ -199,7 +199,7 @@ class TestEnrichNonFood(unittest.IsolatedAsyncioTestCase):
     async def test_non_food_llm_model_is_nop(self):
         from core.enricher import enrich
 
-        with patch("core.enricher.router.analyze", AsyncMock()), \
+        with patch("core.enricher.router.analyse", AsyncMock()), \
              patch("core.enricher.get_or_create_enrichment", return_value=1), \
              patch("core.enricher.log_scan"), \
              patch("core.enricher._queue_for_validation"), \
@@ -208,15 +208,14 @@ class TestEnrichNonFood(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["_enrichment_llm"], "NOP")
 
-
 # ---------------------------------------------------------------------------
-# _queue_for_validation() -- isolated
+# _queue_for_validation_sync() -- isolated
 # ---------------------------------------------------------------------------
 
 class TestQueueForValidation(unittest.TestCase):
 
     def test_writes_json_line(self):
-        from core.enricher import _queue_for_validation
+        from core.enricher import _queue_for_validation_sync
         import json
 
         written = []
@@ -225,18 +224,17 @@ class TestQueueForValidation(unittest.TestCase):
 
         with patch("builtins.open", m), \
              patch("os.makedirs"):
-            _queue_for_validation(FOOD_RECORD)
+            _queue_for_validation_sync(FOOD_RECORD)
 
         self.assertTrue(any(FOOD_RECORD["gtin"] in line for line in written))
 
     def test_silently_handles_write_error(self):
         """File write failures must not propagate -- enrichment should continue."""
-        from core.enricher import _queue_for_validation
+        from core.enricher import _queue_for_validation_sync
 
         with patch("builtins.open", side_effect=OSError("disk full")), \
              patch("os.makedirs"):
-            _queue_for_validation(FOOD_RECORD)  # must not raise
-
+            _queue_for_validation_sync(FOOD_RECORD)  # must not raise
 
 if __name__ == "__main__":
     unittest.main()

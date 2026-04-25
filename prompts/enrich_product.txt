@@ -10,6 +10,15 @@ Analyse this product's ingredients and nutrition data to return a clinical gut h
 3. Write a one-sentence gut health summary based strictly on the ingredients.
 4. Plaintext ONLY. DO NOT use JSON or Markdown.
 
+[EXAMPLE]
+Estimated Health Star: 3.5
+FODMAP Rating: 2
+Coeliac Rating: 0
+Histamine Rating: 1
+Allergens: Milk, Soy
+Health Summary: Generally safe, but monitor portion size due to moderate FODMAPs from the milk powder.
+---
+
 [OUTPUT]
 Estimated Health Star: <0.5-5.0 or null>
 FODMAP Rating: <0|1|2|3|-1>

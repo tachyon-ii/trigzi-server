@@ -12,10 +12,12 @@ from typing import Optional
 from core.llm.router import router
 from core.llm.skills import SkillsLibrary
 from core.llm.config import config as llm_config
+from core.llm.validator import SchemaValidator
 from core.personality import get_persona_instruction
 
 # Initialize the logger for this module
 logger = logging.getLogger(__name__)
+
 
 async def analyse_product(
     gtin:           str,
@@ -29,7 +31,7 @@ async def analyse_product(
     _cfg = llm_config.task_config("analyse_product")
 
     try:
-        response = await router.analyze(
+        response = await router.analyse(
             payload       = {"text": combined},
             profile       = "",
             model_strings = _cfg["models"],
@@ -37,7 +39,6 @@ async def analyse_product(
             timeout       = _cfg["timeout"],
         )
         
-        # Router now returns a raw string. Parse JSON here.
         raw_result = response.get("result")
         if not raw_result:
             return None
@@ -58,7 +59,7 @@ async def analyse_meal(image: str, profile: str) -> Optional[dict]:
     _cfg = llm_config.task_config("analyse_meal")
 
     try:
-        response = await router.analyze(
+        response = await router.analyse(
             payload       = {"image_base64": image},
             profile       = profile,
             model_strings = _cfg["models"],
@@ -66,7 +67,6 @@ async def analyse_meal(image: str, profile: str) -> Optional[dict]:
             timeout       = _cfg["timeout"],
         )
         
-        # Router now returns a raw string. Parse JSON here.
         raw_result = response.get("result")
         if not raw_result:
             return None
@@ -88,7 +88,7 @@ async def analyse_menu(text: str) -> Optional[dict]:
     _cfg = llm_config.task_config("analyse_menu")
 
     try:
-        response = await router.analyze(
+        response = await router.analyse(
             payload       = {"menu_text": text},
             profile       = "", # No profile needed for extraction
             model_strings = _cfg["models"],
@@ -98,38 +98,22 @@ async def analyse_menu(text: str) -> Optional[dict]:
         
         raw_text = response.get("result", "")
         
-        # Failsafe if the model somehow wrapped it in JSON despite instructions
         if isinstance(raw_text, dict):
             raw_text = json.dumps(raw_text)
         else:
             raw_text = str(raw_text)
 
-        # The Dumb Parser (Optimized: No Quote)
-        dishes = []
-        blocks = [b.strip() for b in raw_text.split("---") if b.strip()]
+        # The Robust Parser (Leveraging multi-line regex validation)
+        expected_keys = ["dish", "listed", "suspected"]
+        extracted_blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
         
-        for block in blocks:
+        dishes = []
+        for block in extracted_blocks:
             dish_data = {
-                "name": "Unknown",
-                "listed_ingredients": [],
-                "suspected_ingredients": []
+                "name": block.get("dish", "Unknown"),
+                "listed_ingredients": [i.strip() for i in block.get("listed", "").split(',') if i.strip()],
+                "suspected_ingredients": [i.strip() for i in block.get("suspected", "").split(',') if i.strip()]
             }
-            
-            for line in block.split('\n'):
-                line = line.strip()
-                if not line or ':' not in line: 
-                    continue
-                 
-                key, val = [part.strip() for part in line.split(':', 1)]
-                key = key.lower()
-                
-                if key == "dish": 
-                    dish_data["name"] = val
-                elif key == "listed": 
-                    dish_data["listed_ingredients"] = [i.strip() for i in val.split(',') if i.strip()]
-                elif key == "suspected": 
-                    dish_data["suspected_ingredients"] = [i.strip() for i in val.split(',') if i.strip()]
-
             if dish_data["name"] != "Unknown":
                 dishes.append(dish_data)
 
@@ -139,6 +123,7 @@ async def analyse_menu(text: str) -> Optional[dict]:
         logger.error(f" analyse_menu failed: {e}")
         return None
 
+
 async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
     """Extract missing nutrition data from an OCR panel using flat-text parsing."""
     if not ocr_text:
@@ -146,11 +131,10 @@ async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
 
     prompt = SkillsLibrary.enrich_nutrition_prompt(ocr_text)
     
-    # Will fallback to standard routing defaults if not explicitly defined in llm_providers.json
     _cfg = llm_config.task_config("enrich_nutrition") 
 
     try:
-        response = await router.analyze(
+        response = await router.analyse(
             payload       = {"prompt": prompt},
             profile       = "", 
             model_strings = _cfg["models"],
@@ -160,41 +144,31 @@ async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
         
         raw_text = str(response.get("result", "")).strip()
         
-        # The Dumb Parser: Convert flat key: value list into a dictionary
-        parsed = {}
-        for line in raw_text.split('\n'):
-            line = line.strip()
-            if not line or ':' not in line or line.startswith('#'): 
-                continue
-                
-            key, _, val = line.partition(':')
-            key = key.strip().lower()
-            val = val.strip()
-            
+        expected_keys = [
+            "energy_kj", "calories_kcal", "protein_g", "fat_total_g", 
+            "fat_saturated_g", "carbohydrates_g", "sugars_g", "fibre_g", "sodium_mg"
+        ]
+        
+        blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
+        parsed = blocks[0] if blocks else {}
+
+        final_nutrition = {}
+        for key in expected_keys:
+            val = parsed.get(key, "")
             if val:
                 try:
-                    parsed[key] = float(val)
+                    final_nutrition[key] = float(val)
                 except ValueError:
-                    parsed[key] = None
+                    final_nutrition[key] = None
             else:
-                parsed[key] = None
+                final_nutrition[key] = None
 
-        # Return strictly mapped keys matching the iOS NutritionJSON schema
-        return {
-            "energy_kj": parsed.get("energy_kj"),
-            "calories_kcal": parsed.get("calories_kcal"),
-            "protein_g": parsed.get("protein_g"),
-            "fat_total_g": parsed.get("fat_total_g"),
-            "fat_saturated_g": parsed.get("fat_saturated_g"),
-            "carbohydrates_g": parsed.get("carbohydrates_g"),
-            "sugars_g": parsed.get("sugars_g"),
-            "fibre_g": parsed.get("fibre_g"),
-            "sodium_mg": parsed.get("sodium_mg")
-        }
+        return final_nutrition
 
     except Exception as e:
         logger.error(f" enrich_nutrition failed: {e}", exc_info=True)
         return None
+
 
 # ---------------------------------------------------------------------------
 # Chat Pipeline (Pipelined for SSE Streaming)
@@ -216,10 +190,18 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
 
     persona_instruction = get_persona_instruction(system_context)
 
-    ctx_str = (
-        f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}\n"
-        f"Active Menu Context: {json.dumps(system_context.get('current_menu', []))}"
-    )
+    # Context Aggregation: Dietary Profile + Spatial/Temporal Environment
+    ctx_parts = [
+        f"Dietary Profile: {json.dumps(system_context.get('dietary_profile', {}))}"
+    ]
+    if 'current_menu' in system_context:
+        ctx_parts.append(f"Active Menu Context: {json.dumps(system_context['current_menu'])}")
+    if 'spatial_context' in system_context:
+        ctx_parts.append(f"Spatial Context: {system_context['spatial_context']}")
+    if 'temporal_context' in system_context:
+        ctx_parts.append(f"Recent User Focus:\n{system_context['temporal_context']}")
+
+    ctx_str = "\n\n".join(ctx_parts)
 
     hist_str = ""
     for msg in history:
@@ -232,14 +214,14 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
         history=hist_str,
         message=message,
         trigzi_nickname=trigzi_nickname,
-        persona_instruction=persona_instruction # <-- PASS TO TEMPLATE
+        persona_instruction=persona_instruction
     )
 
     # DYNAMIC CONFIG ROUTING
     _cfg = llm_config.task_config("chat_assistant")
 
     try:
-        response = await router.analyze(
+        response = await router.analyse(
             payload       = {"prompt": prompt},
             profile       = "", 
             model_strings = _cfg["models"], 
@@ -270,6 +252,7 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
         logger.error(f" chat_assistant failed: {e}", exc_info=True)
         return None, None
 
+
 async def chat_emoji(text: str) -> str:
     """Task 2: Micro-inference to safely append an emoji."""
     if not text:
@@ -277,11 +260,10 @@ async def chat_emoji(text: str) -> str:
 
     prompt = SkillsLibrary.chat_emoji_prompt(text=text)
 
-    # DYNAMIC CONFIG ROUTING
     _cfg = llm_config.task_config("chat_emoji")
 
     try:
-        response = await router.analyze(
+        response = await router.analyse(
             payload       = {"prompt": prompt},
             profile       = "",
             model_strings = _cfg["models"], 
@@ -300,18 +282,17 @@ async def chat_emoji(text: str) -> str:
         logger.error(f" chat_emoji failed: {e}")
         return ""
 
+
 async def onboarding_assistant(message: str, fallback_name: str, trigzi_nickname: str = "Trigzi") -> tuple[list[dict], str]:
     """Task: Execute scripted onboarding. Returns (events, text_to_emojify)."""
     if not message:
         return [{"event": "error", "data": {"message": "Empty message."}}], ""
 
-    # INJECT into prompt builder:
     prompt = SkillsLibrary.onboarding_prompt(message, fallback_name, trigzi_nickname)
-
     _cfg = llm_config.task_config("chat_assistant")
 
     try:
-        response = await router.analyze(
+        response = await router.analyse(
             payload       = {"prompt": prompt},
             profile       = "", 
             model_strings = _cfg["models"], 
@@ -353,12 +334,12 @@ async def onboarding_assistant(message: str, fallback_name: str, trigzi_nickname
         logger.error(f" onboarding_assistant failed: {e}")
         return [{"event": "error", "data": {"message": "Analysis failed."}}], ""
 
+
 async def sigmund_assistant(system_context: dict, history: list, message: str) -> tuple[Optional[str], Optional[str]]:
     """Task 1b: The Sigmund Intercept. High-EQ psychological de-escalation."""
     if not message:
         return None, None
 
-    # Defensive type coercion
     if isinstance(system_context, str):
         try:
             system_context = json.loads(system_context)
@@ -377,18 +358,16 @@ async def sigmund_assistant(system_context: dict, history: list, message: str) -
         role = "User" if msg.get("role") == "user" else "Trigzi"
         hist_str += f"{role}: {msg.get('content', '')}\n"
 
-    # INJECT into prompt builder:
     prompt = SkillsLibrary.sigmund_assistant_prompt(
         system_context=ctx_str,
         history=hist_str,
         message=message
     )
 
-    # DYNAMIC CONFIG ROUTING - Fallback to chat_assistant config if sigmund isn't explicitly defined
     _cfg = llm_config.task_config("chat_sigmund") 
 
     try:
-        response = await router.analyze(
+        response = await router.analyse(
             payload       = {"prompt": prompt},
             profile       = "", 
             model_strings = _cfg["models"], 
@@ -402,9 +381,6 @@ async def sigmund_assistant(system_context: dict, history: list, message: str) -
             raw_text = raw_text[9:]
         raw_text = raw_text.strip(" \n-")
 
-        # =================================================================
-        # THE ACTION INTERCEPTOR (UI OVERRIDES)
-        # =================================================================
         action_command = None
         action_match = re.search(r'\[ACTION:\s*([^\]]+)\]', raw_text)
         

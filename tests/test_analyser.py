@@ -56,7 +56,7 @@ class TestAnalyseProduct(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_result_on_success(self):
         from core.analyser import analyse_product
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             result = await analyse_product(
                 gtin="0070177161170",
@@ -67,7 +67,7 @@ class TestAnalyseProduct(unittest.IsolatedAsyncioTestCase):
 
     async def test_payload_contains_combined_text(self):
         from core.analyser import analyse_product
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             await analyse_product(
                 gtin="0070177161170",
@@ -80,14 +80,14 @@ class TestAnalyseProduct(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_none_when_both_texts_empty(self):
         from core.analyser import analyse_product
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             result = await analyse_product(gtin="0070177161170", text_front="", text_nutrition="")
         self.assertIsNone(result)
         mock.assert_not_called()
 
     async def test_returns_none_on_router_exception(self):
         from core.analyser import analyse_product
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.side_effect = Exception("Router failed")
             result = await analyse_product(
                 gtin="0070177161170",
@@ -102,7 +102,7 @@ class TestAnalyseProduct(unittest.IsolatedAsyncioTestCase):
         mock_cfg = {"models": ["gemini"], "optimize": "accuracy", "timeout": 30}
         
         with patch("core.analyser.llm_config.task_config", return_value=mock_cfg), \
-             patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+             patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             await analyse_product("x", "front", "nutrition")
         
@@ -117,14 +117,14 @@ class TestAnalyseMeal(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_result_on_success(self):
         from core.analyser import analyse_meal
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             result = await analyse_meal(image="base64data==", profile="Low FODMAP")
         self.assertEqual(result, MOCK_RESULT)
 
     async def test_payload_uses_image_base64_key(self):
         from core.analyser import analyse_meal
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             await analyse_meal(image="base64data==", profile="")
         payload = mock.call_args.kwargs["payload"]
@@ -133,21 +133,21 @@ class TestAnalyseMeal(unittest.IsolatedAsyncioTestCase):
 
     async def test_profile_forwarded_to_router(self):
         from core.analyser import analyse_meal
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_ROUTER_JSON_RESPONSE
             await analyse_meal(image="data==", profile="Dairy Free")
         self.assertEqual(mock.call_args.kwargs["profile"], "Dairy Free")
 
     async def test_returns_none_for_empty_image(self):
         from core.analyser import analyse_meal
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             result = await analyse_meal(image="", profile="")
         self.assertIsNone(result)
         mock.assert_not_called()
 
     async def test_returns_none_on_router_exception(self):
         from core.analyser import analyse_meal
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.side_effect = Exception("timeout")
             result = await analyse_meal(image="data==", profile="")
         self.assertIsNone(result)
@@ -161,7 +161,7 @@ class TestAnalyseMenu(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_result_on_success(self):
         from core.analyser import analyse_menu
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_ROUTER_MENU_RESPONSE
             result = await analyse_menu(text="Pad Thai $18\nGreen Curry $20")
             
@@ -171,7 +171,7 @@ class TestAnalyseMenu(unittest.IsolatedAsyncioTestCase):
 
     async def test_payload_uses_menu_text_key(self):
         from core.analyser import analyse_menu
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_ROUTER_MENU_RESPONSE
             await analyse_menu(text="menu text")
         payload = mock.call_args.kwargs["payload"]
@@ -180,14 +180,14 @@ class TestAnalyseMenu(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_none_for_empty_text(self):
         from core.analyser import analyse_menu
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             result = await analyse_menu(text="")
         self.assertIsNone(result)
         mock.assert_not_called()
 
     async def test_returns_none_on_router_exception(self):
         from core.analyser import analyse_menu
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.side_effect = RuntimeError("provider down")
             result = await analyse_menu(text="some menu")
         self.assertIsNone(result)
@@ -198,7 +198,7 @@ class TestAnalyseMenu(unittest.IsolatedAsyncioTestCase):
         mock_cfg = {"models": ["m1", "m2"], "optimize": "failover", "timeout": 10}
         
         with patch("core.analyser.llm_config.task_config", return_value=mock_cfg), \
-             patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+             patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_ROUTER_MENU_RESPONSE
             await analyse_menu(text="menu")
             
@@ -221,7 +221,7 @@ class TestChatAssistant(unittest.IsolatedAsyncioTestCase):
             "provider": "Gemini"
         }
         
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = mock_router_response
             
             # THE SMOKING GUN: Passing a raw string instead of a dict
@@ -246,7 +246,7 @@ class TestChatAssistant(unittest.IsolatedAsyncioTestCase):
         """Verify the parser degrades gracefully if the LLM fails."""
         from core.analyser import chat_assistant
         
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.side_effect = Exception("LLM Timeout")
             
             # 🛡️ THE FIX: Unpack the tuple here as well
@@ -278,7 +278,7 @@ class TestOnboardingAssistant(unittest.IsolatedAsyncioTestCase):
             "provider": "Gemini",
         }
 
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = mock_router_response
             
             events, text_content = await onboarding_assistant("Whatever.", "Zesty Koala")
@@ -298,7 +298,7 @@ class TestOnboardingAssistant(unittest.IsolatedAsyncioTestCase):
         
         mock_raw_response = "Action: start_tour\n---"
         
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = {"result": mock_raw_response}
             events, _ = await onboarding_assistant("Yes", "Zesty Koala")
             
@@ -309,7 +309,7 @@ class TestOnboardingAssistant(unittest.IsolatedAsyncioTestCase):
         """Verify the pipeline bails early if no message is provided."""
         from core.analyser import onboarding_assistant
         
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             events, text = await onboarding_assistant("", "Zesty Koala")
             
         self.assertEqual(events[0]["event"], "error")
@@ -320,7 +320,7 @@ class TestOnboardingAssistant(unittest.IsolatedAsyncioTestCase):
         """Verify the parser degrades gracefully if the LLM fails or times out."""
         from core.analyser import onboarding_assistant
         
-        with patch("core.analyser.router.analyze", new_callable=AsyncMock) as mock:
+        with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.side_effect = Exception("LLM Timeout")
             events, text = await onboarding_assistant("Hello", "Zesty Koala")
             

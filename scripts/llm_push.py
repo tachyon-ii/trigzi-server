@@ -56,7 +56,7 @@ def load_prompt(path: str) -> str:
 
 async def call_router(prompt: str, provider: str, timeout: float) -> tuple[str, str]:
     """Call the LLM router. Returns (response_text, model_used)."""
-    response = await router.analyze(
+    response = await router.analyse(
         payload       = {"prompt": prompt},
         profile       = "",
         model_strings = [provider],

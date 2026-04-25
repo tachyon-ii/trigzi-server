@@ -41,7 +41,7 @@ class BaseProvider:
     def retry_delay(self) -> float:
         return 1.0
 
-    async def analyze(
+    async def analyse(
         self,
         payload_data: Dict[str, Any],
         profile: str,
@@ -101,7 +101,7 @@ class BaseProvider:
 
         # Payload dispatch
         if "image_base64" in payload_data:
-            prompt  = SkillsLibrary.analyze_food_image_prompt(profile)
+            prompt  = SkillsLibrary.analyse_food_image_prompt(profile)
             payload = self.request_filter.build_image_payload(
                 prompt, payload_data["image_base64"], model_tag
             )
@@ -117,7 +117,7 @@ class BaseProvider:
             payload = self.request_filter.build_text_payload(prompt, model_tag)
 
         elif "text" in payload_data:
-            prompt  = SkillsLibrary.analyze_text_prompt(payload_data["text"], profile)
+            prompt  = SkillsLibrary.analyse_text_prompt(payload_data["text"], profile)
             payload = self.request_filter.build_text_payload(prompt, model_tag)
 
         elif "prompt" in payload_data:

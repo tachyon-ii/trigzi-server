@@ -1,4 +1,29 @@
-# core/llm/router.py
+#!/usr/bin/env python3
+from __future__ import annotations
+"""
+=============================================================================
+Module:        LLM Router
+Location:      core/llm/router.py
+Description:   Central dispatch and execution engine for all LLM API calls.
+               Decouples the application layer from specific providers (OpenAI,
+               Claude, Gemini) and manages dynamic execution strategies.
+               
+               Execution Modes:
+               - direct:   Standard 1:1 call to a specific model.
+               - failover: Sequential fallback if the primary provider fails.
+               - race:     Fires multiple providers concurrently, returning the fastest.
+               - ab:       Fires a primary model returning to the user, while silently 
+                           firing secondary models in the background for data gathering.
+               - cost:     Dynamically selects the cheapest capable model.
+               
+               Architecture Note: 
+               This layer acts as a 'dumb pipe'. It does not parse or validate 
+               LLM outputs (that is delegated to SchemaValidator). It strictly 
+               handles HTTP transport, latency tracking, and non-blocking I/O 
+               telemetry logging via asyncio.to_thread.
+=============================================================================
+"""
+
 import asyncio
 import os
 import uuid
@@ -28,7 +53,7 @@ class LLMRouter:
 
     # MARK: - Public API
 
-    async def analyze(
+    async def analyse(
         self,
         payload: Dict[str, Any],
         profile: str,
@@ -81,10 +106,10 @@ class LLMRouter:
         resolved_tag = config.resolve(model_tag, provider_key)
         
         # LOGGING INJECTION: Watch the handoff instantly
-        logging.info(f"➡️ Routing request to {provider_key.upper()} ({resolved_tag})...")
+        logging.info(f"📍 Routing request to {provider_key.upper()} ({resolved_tag})...")
 
         try:
-            response = await provider.analyze(payload, profile, resolved_tag, timeout)
+            response = await provider.analyse(payload, profile, resolved_tag, timeout)
             response['payload'] = payload  
             self._record_call(response, session_id, success=True)
             self._update_latency(resolved_tag, response["latency_ms"])
@@ -132,7 +157,7 @@ class LLMRouter:
                 response = await self._execute_direct(payload, profile, m, session_id, timeout)
                 if is_fallback:
                     response["was_fallback"] = True
-                    logging.info(f"⚡️ Failover succeeded via {m}")
+                    logging.info(f"⚡ Failover succeeded via {m}")
                 return response
             except LLMError as e:
                 if not e.is_failoverable:
@@ -203,7 +228,8 @@ class LLMRouter:
             
         return "unknown", s
 
-    def _record_call(self, response: Dict[str, Any], session_id: str, success: bool):
+    def _record_call_sync(self, response: Dict[str, Any], session_id: str, success: bool):
+        """Blocking file write executed on a background thread."""
         timestamp = datetime.now()
         ts_human  = timestamp.strftime('%Y-%m-%dT%H:%M:%SZ')
         ts_file   = timestamp.strftime('%Y%m%d%H%M%S')
@@ -233,6 +259,10 @@ class LLMRouter:
 
         except Exception as e:
             logging.error(f"llm_responses write failed: {e}")
+
+    def _record_call(self, response: Dict[str, Any], session_id: str, success: bool):
+        """Fire-and-forget wrapper to prevent blocking the async event loop."""
+        asyncio.create_task(asyncio.to_thread(self._record_call_sync, response, session_id, success))
 
     def _update_latency(self, model_tag: str, latency_ms: int):
         if model_tag not in self._latency_cache:

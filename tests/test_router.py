@@ -28,8 +28,8 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
         fast_resp = {"provider": "Gemini", "model": "flash", "latency_ms": 100, "result": {"safe": False}}
         slow_resp = {"provider": "Claude", "model": "sonnet", "latency_ms": 5000, "result": {"safe": False}}
 
-        with patch.object(router.registry["gemini"], "analyze", new_callable=AsyncMock) as mock_gem:
-            with patch.object(router.registry["claude"], "analyze", new_callable=AsyncMock) as mock_claude:
+        with patch.object(router.registry["gemini"], "analyse", new_callable=AsyncMock) as mock_gem:
+            with patch.object(router.registry["claude"], "analyse", new_callable=AsyncMock) as mock_claude:
                 
                 mock_gem.return_value = fast_resp
                 
@@ -40,7 +40,7 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
                 mock_claude.side_effect = slow_call
 
                 # Run race
-                winner = await router.analyze(
+                winner = await router.analyse(
                     self.payload, self.profile, 
                     model_strings=["gemini", "claude"], 
                     optimize="speed"
@@ -51,8 +51,8 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
 
     async def test_failover_mode(self):
         """Verify failover chain tries next model when the first hits a 5xx/429."""
-        with patch.object(router.registry["gemini"], "analyze", new_callable=AsyncMock) as mock_gem:
-            with patch.object(router.registry["claude"], "analyze", new_callable=AsyncMock) as mock_claude:
+        with patch.object(router.registry["gemini"], "analyse", new_callable=AsyncMock) as mock_gem:
+            with patch.object(router.registry["claude"], "analyse", new_callable=AsyncMock) as mock_claude:
                 
                 # Gemini fails with a server error (failoverable)
                 mock_gem.side_effect = LLMError.server_error("Gemini", 500, "Oops")
@@ -62,7 +62,7 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
                     "provider": "Claude", "model": "haiku", "latency_ms": 200, "result": {"safe": True}
                 }
 
-                response = await router.analyze(
+                response = await router.analyse(
                     self.payload, self.profile, 
                     model_strings=["gemini", "claude"], 
                     optimize="failover"    # explicit failover — cost now has its own routing path
@@ -74,14 +74,14 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
 
     async def test_failover_terminal_failure(self):
         """Verify non-failoverable errors (invalid request) stop the chain immediately."""
-        with patch.object(router.registry["gemini"], "analyze", new_callable=AsyncMock) as mock_gem:
-            with patch.object(router.registry["claude"], "analyze", new_callable=AsyncMock) as mock_claude:
+        with patch.object(router.registry["gemini"], "analyse", new_callable=AsyncMock) as mock_gem:
+            with patch.object(router.registry["claude"], "analyse", new_callable=AsyncMock) as mock_claude:
 
                 # Gemini fails with a non-failoverable error (invalid request)
                 mock_gem.side_effect = LLMError.invalid_request("Bad Prompt")
 
                 with self.assertRaises(LLMError) as cm:
-                    await router.analyze(
+                    await router.analyse(
                         self.payload, self.profile,
                         model_strings=["gemini", "claude"],
                         optimize="failover"  # must be failover mode — ab mode would succeed on primary
@@ -99,12 +99,12 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
             "latency_ms": 300, "result": {"safe": True}
         }
 
-        with patch.object(router.registry["gemini"], "analyze", new_callable=AsyncMock) as mock_gem:
-            with patch.object(router.registry["claude"], "analyze", new_callable=AsyncMock) as mock_claude:
+        with patch.object(router.registry["gemini"], "analyse", new_callable=AsyncMock) as mock_gem:
+            with patch.object(router.registry["claude"], "analyse", new_callable=AsyncMock) as mock_claude:
                 mock_gem.return_value   = cheapest_resp
                 mock_claude.return_value = {"provider": "Claude", "model": "sonnet", "latency_ms": 200, "result": {}}
 
-                response = await router.analyze(
+                response = await router.analyse(
                     self.payload, self.profile,
                     model_strings=["claude", "gemini"],
                     optimize="cost"

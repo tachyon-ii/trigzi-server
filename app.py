@@ -1,9 +1,27 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-#
-#  app.py
-#  trigzi
-#
+"""
+=============================================================================
+Module:        Quart ASGI Application (Transport Layer)
+Location:      app.py
+Description:   The HTTP and Server-Sent Events (SSE) streaming API for Trigzi.
+               
+               Architecture Note:
+               This file is strictly a TRANSPORT layer. It manages network
+               requests, payload extraction, and yields SSE event chunks.
+               
+               It MUST NOT contain any database manipulation, file I/O, or 
+               business logic. 
+               - DB Reads: Delegated to `core/data_manager.py`
+               - DB Writes: Delegated to `core/enricher.py`
+               - LLM Orchestration: Delegated to `core/analyser.py`
+               
+               Concurrency:
+               Runs on the Hypercorn ASGI server. Any blocking operations must 
+               be explicitly offloaded to background threads to prevent starving 
+               the async event loop and dropping client connections.
+=============================================================================
+"""
 
 import os
 import json
@@ -12,8 +30,8 @@ from quart import Quart, jsonify, request, Response
 
 from core import data_manager
 from core.db import init_pool, close_pool
-from core.enricher import enrich
-from core.analyser import analyse_product, analyse_meal, analyse_menu, chat_assistant, chat_emoji, onboarding_assistant, sigmund_assistant
+from core.enricher import enrich, patch_nutrition
+from core.analyser import analyse_product, analyse_meal, analyse_menu, chat_assistant, chat_emoji, onboarding_assistant, sigmund_assistant, enrich_nutrition
 from core.telemetry import telemetry_bp, log_ocr_scan, log_menu_scan
 from core.messages.messages_service import get_messages
 
@@ -69,13 +87,12 @@ async def get_product(gtin):
             label = f"{name} by {brand}" if brand else name
             yield _sse("progress", {"message": f"Found {label}"})
      
-            yield _sse("progress", {"message": "Running latest analytics\u2026"})
+            yield _sse("progress", {"message": "Running latest analytics…"})
      
             enriched = await enrich(record)
             yield _sse("enriched", {"status": "complete", "product": enriched})
             
         except Exception as e:
-            # THE FIX: Catch enrichment crashes and cleanly close the iOS scanner
             logger.error(f"Product enrichment stream crashed: {str(e)}", exc_info=True)
             yield _sse("error", {"message": "Analytics failed. Please try scanning again."})
 
@@ -145,7 +162,6 @@ async def analyse_menu_route():
         logger.error("Missing text in menu request")
         return jsonify({"error": "Missing text."}), 400
 
-    # CRITICAL: Save the SEZAR menu to disk so we can A/B test it
     saved_file = log_menu_scan(text)
     logger.info(f"Analyse menu ({len(text)} chars) -> Saved to {saved_file}")
 
@@ -160,10 +176,6 @@ async def analyse_menu_route():
 async def chat_stream_endpoint():
     try:
         data = await request.get_json() 
-        print("\n" + "🔥"*30)
-        print("📥 [APP.PY] INCOMING PAYLOAD FROM iOS:")
-        print(json.dumps(data, indent=2))
-        print("🔥"*30 + "\n")
     except Exception as e:
         print(f"❌ Failed to parse incoming JSON: {e}")
         return jsonify({"error": "Invalid payload."}), 400
@@ -184,27 +196,23 @@ async def chat_stream_endpoint():
 
     async def generate():
         try:
-            # 1. Pipeline Stage 1: The Heavy Lift
             text, action_cmd = await chat_assistant(system_context, history, message, trigzi_nickname)
             
             if not text:
                 yield _sse("error", {"message": "Analysis failed."})
                 return
          
-            # 🧹 Strip the schema scaffolding before sending down the wire
             clean_text = text.replace("Message: ", "").replace("Message:", "").replace("\nAction:", "").replace("Action:", "").strip()
             
             if clean_text:
                 yield _sse("text", {"content": clean_text})
 
-            # 🛠️ Safely parse and yield the action command if one exists
             if action_cmd:
                 tool_parts = action_cmd.split("|", 1)
                 tool = tool_parts[0].strip()
                 param = tool_parts[1].strip() if len(tool_parts) > 1 else ""
                 yield _sse("action", {"tool": tool, "param": param})
 
-            # 2. Pipeline Stage 2: The UI Flourish
             if clean_text:
                 emoji = await chat_emoji(clean_text)
                 if emoji:
@@ -224,9 +232,6 @@ async def chat_stream_endpoint():
 
 @app.route('/api/v1/chat/emoji', methods=['POST'])
 async def chat_emoji_route():
-    """
-    Isolated testing endpoint for the tone-evaluation micro-inference task.
-    """
     data = await request.get_json()
     if not data:
         return jsonify({"error": "Invalid payload."}), 400
@@ -236,12 +241,10 @@ async def chat_emoji_route():
         text = text.strip()
 
     if not text:
-        return jsonify({"error": "Missing 'text' field to analyze."}), 400
+        return jsonify({"error": "Missing 'text' field to analyse."}), 400
 
-    # Hit the micro-inference function directly
     emoji = await chat_emoji(text)
 
-    # Return the result (even if it's an empty string for safety)
     return jsonify({
         "status": "ok",
         "emoji": emoji
@@ -268,27 +271,22 @@ async def chat_onboarding_route():
 
     async def generate():
         try:
-            # 1. The Heavy Lift: Get parsed events and the raw text
             events, text_content = await onboarding_assistant(message, fallback_name, trigzi_nickname)
             
-            # 2. BANG ON WIRE: Instantly flush text, facts, and actions to iOS
             for evt in events:
                 yield _sse(evt["event"], evt["data"])
 
-            # 3. PAUSE & EVALUATE: Run micro-inference while the user is reading
             if text_content:
                 emoji = await chat_emoji(text_content)
                 if emoji:
                     yield _sse("emoji", {"content": f" {emoji}"})
 
-            # 4. CLOSE
             yield _sse("done", {})
             
         except Exception as e:
             logger.error(f"Stream crashed: {str(e)}", exc_info=True)
             yield _sse("error", {"message": "Analysis failed."})
 
-    # This must be outdented to align with `async def generate():`
     return Response(generate(), mimetype='text/event-stream', headers={
         'Cache-Control':     'no-cache',
         'X-Accel-Buffering': 'no',
@@ -299,10 +297,6 @@ async def chat_onboarding_route():
 async def chat_sigmund_endpoint():
     try:
         data = await request.get_json() 
-        print("\n" + "🛡️"*30)
-        print("📥 [APP.PY] INCOMING SIGMUND INTERCEPT:")
-        print(json.dumps(data, indent=2))
-        print("🛡️"*30 + "\n")
     except Exception as e:
         print(f"❌ Failed to parse incoming JSON: {e}")
         return jsonify({"error": "Invalid payload."}), 400
@@ -320,7 +314,6 @@ async def chat_sigmund_endpoint():
 
     async def generate():
         try:
-            # 1. The Heavy Lift (High-EQ Model)
             text, action_cmd = await sigmund_assistant(system_context, history, message)
             
             if not text:
@@ -329,14 +322,12 @@ async def chat_sigmund_endpoint():
          
             yield _sse("text", {"content": text})
 
-            # 2. Hard Crisis Escalation Catch
             if action_cmd:
                 tool_parts = action_cmd.split("|", 1)
                 tool = tool_parts[0].strip()
                 param = tool_parts[1].strip() if len(tool_parts) > 1 else ""
                 yield _sse("action", {"tool": tool, "param": param})
 
-            # NO EMOJI FLOURISH FOR CRISIS ROUTING
             yield _sse("done", {})
             
         except Exception as e:
@@ -363,48 +354,22 @@ async def enrich_nutrition_route():
 
     logger.info(f"Enrich nutrition requested for GTIN: {gtin}")
     
-    # 1. Call LLM to parse OCR text
-    from core.analyser import enrich_nutrition
     nutrition_data = await enrich_nutrition(gtin, ocr_text)
     
     if not nutrition_data:
         logger.error(f"Nutrition extraction failed for GTIN: {gtin}")
         return jsonify({"error": "Failed to parse nutrition data."}), 500
 
-    # 2. Patch the global database so the hole is permanently fixed
-    from utils.off_lookup import lookup
-    record = await lookup.get(gtin)
-    if record:
-        record["nutrition_100g"] = nutrition_data
-        
-        # Save it back to MariaDB. lookup.save handles preserving the existing enrichment_id
-        await lookup.save(record)
+    patched = await patch_nutrition(gtin, nutrition_data)
+    if patched:
         logger.info(f"Successfully patched nutrition data for GTIN: {gtin} in global database.")
     else:
         logger.warning(f"Could not find GTIN {gtin} in database to patch, returning payload to client anyway.")
 
-    # 3. Return the payload to the iOS client so it can update its local SwiftData cache
     return jsonify(nutrition_data), 200
 
 @app.route('/api/v1/messages', methods=['GET'])
 async def messages_route():
-    """
-    GET /api/v1/messages
- 
-    Upserts the device session, then returns today's single MOTD message
-    or [] if already delivered. Dedup is keyed on motd_last_date in MariaDB
-    — consistent across all Hypercorn workers.
- 
-    Headers:
-        Authorization:  Bearer <token>   (required)
-        X-Device-ID:    <vendor UUID>    (required)
-        X-App-Version:  <build string>   (optional)
- 
-    Query params:
-        since   (int)   Reserved for future server-push alerts.
-        context (str)   Filter by context, e.g. "motd".
-        force   (int)   1 = skip dedup. Testing only.
-    """
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return jsonify({"error": "Unauthorized."}), 401

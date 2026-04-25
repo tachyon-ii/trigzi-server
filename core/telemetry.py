@@ -13,13 +13,11 @@ Logging helpers:
     log_scan()        — OFF/Woolworths/Coles enrichment input
     log_ocr_scan()    — dual-capture OCR scan input
     log_unmatched()   — unmatched GTIN (product acquisition queue)
-
-Sort unmatched by frequency:
-    sort logs/unmatched.log | uniq -c | sort -rn | head -50
 """
 
 import os
 import time
+import asyncio
 from quart import Blueprint, request, jsonify
 
 BASE_DIR      = os.path.join(os.path.dirname(__file__), '..')
@@ -28,14 +26,12 @@ UNMATCHED_LOG = os.path.join(BASE_DIR, 'logs', 'unmatched.log')
 
 telemetry_bp = Blueprint('telemetry', __name__)
 
-
 # --- Internal helpers ---
 
 def _ts() -> str:
     return str(int(time.time()))
 
-
-def _write_scan(filename: str, content: str) -> None:
+def _write_scan_sync(filename: str, content: str) -> None:
     os.makedirs(SCANS_DIR, exist_ok=True)
     try:
         with open(os.path.join(SCANS_DIR, filename), 'w', encoding='utf-8') as f:
@@ -43,6 +39,16 @@ def _write_scan(filename: str, content: str) -> None:
     except OSError as e:
         print(f"  [!] telemetry write failed: {e}")
 
+def _write_scan(filename: str, content: str) -> None:
+    asyncio.create_task(asyncio.to_thread(_write_scan_sync, filename, content))
+
+def _log_unmatched_sync(gtin: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(UNMATCHED_LOG), exist_ok=True)
+        with open(UNMATCHED_LOG, 'a', encoding='utf-8') as f:
+            f.write(f"{gtin}\n")
+    except OSError as e:
+        print(f"  [!] unmatched log write failed: {e}")
 
 # --- Public logging API ---
 
@@ -56,7 +62,6 @@ def log_scan(gtin: str, source: str, text: str) -> None:
         f"=== INGREDIENTS ===\n"
         f"{text}\n"
     ))
-
 
 def log_ocr_scan(gtin: str, text_front: str, text_nutrition: str) -> None:
     """Log a dual-capture OCR scan input."""
@@ -86,13 +91,7 @@ def log_menu_scan(text: str) -> str:
 
 def log_unmatched(gtin: str) -> None:
     """Log an unmatched GTIN to the product acquisition queue."""
-    try:
-        os.makedirs(os.path.dirname(UNMATCHED_LOG), exist_ok=True)
-        with open(UNMATCHED_LOG, 'a', encoding='utf-8') as f:
-            f.write(f"{gtin}\n")
-    except OSError as e:
-        print(f"  [!] unmatched log write failed: {e}")
-
+    asyncio.create_task(asyncio.to_thread(_log_unmatched_sync, gtin))
 
 # --- Routes ---
 

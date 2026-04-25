@@ -9,7 +9,7 @@ Implements probe() for each provider — a lightweight operation that:
   4. Validates that the configured default model is in that list
   5. Reports remaining API credit where available via response headers
 
-Credit remaining is also updated on every normal analyze() call via
+Credit remaining is also updated on every normal analyse() call via
 BaseProvider._update_credit_from_headers() — probe() initialises the
 field but does not block on it.
 

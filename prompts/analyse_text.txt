@@ -10,6 +10,16 @@ Analyze OCR text and evaluate it against the user's dietary profile.
 3. For each item, provide a verdict (Safe / Caution / Avoid).
 4. Plaintext ONLY. DO NOT use JSON or Markdown.
 
+[EXAMPLE]
+Item: Margherita Pizza
+Verdict: Safe
+Summary: Simple pizza safe for your profile.
+Warnings: 
+Ingredients: wheat flour, tomatoes, mozzarella, basil
+Flagged: 
+Reasoning: Contains gluten and dairy, but you have no active restrictions for these elements in your profile.
+---
+
 [OUTPUT]
 Item: <Item name>
 Verdict: <Safe|Caution|Avoid>

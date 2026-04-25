@@ -22,13 +22,13 @@ class SkillsLibrary:
             return f.read()
 
     @staticmethod
-    def analyze_text_prompt(ocr_text: str, profile: str) -> str:
-        template = SkillsLibrary._load_prompt('analyze_text.txt')
+    def analyse_text_prompt(ocr_text: str, profile: str) -> str:
+        template = SkillsLibrary._load_prompt('analyse_text.txt')
         return template.format(profile=profile, ocr_text=ocr_text)
 
     @staticmethod
-    def analyze_food_image_prompt(profile: str) -> str:
-        template = SkillsLibrary._load_prompt('analyze_food_image.txt')
+    def analyse_food_image_prompt(profile: str) -> str:
+        template = SkillsLibrary._load_prompt('analyse_food_image.txt')
         return template.format(profile=profile)
 
     @staticmethod

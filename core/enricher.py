@@ -9,13 +9,10 @@ from __future__ import annotations
 #  Writes enrichment_id FK back to products so the exact prompt×model
 #  that produced each clinical profile is permanently recorded.
 #
-#  Routing (models, optimize, timeout) is read from the 'enrich' task
-#  in llm_providers.json via llm_config.task_config("enrich").
-#  No routing constants live in this file.
-#
 
 import os
 import json
+import asyncio
 from typing import Optional
 
 from utils.off_lookup import OFFLookup
@@ -38,7 +35,6 @@ NON_FOOD_CATEGORIES = {
 
 _off = OFFLookup()
 
-
 def _nop_profile() -> dict:
     return {
         "estimated_health_star": None,
@@ -49,14 +45,16 @@ def _nop_profile() -> dict:
         "health_summary":        "Non-food item. No clinical gut health profile applies."
     }
 
-
-def _queue_for_validation(record: dict) -> None:
+def _queue_for_validation_sync(record: dict) -> None:
     try:
         os.makedirs(os.path.dirname(VALIDATE_JSONL), exist_ok=True)
         with open(VALIDATE_JSONL, 'a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
     except Exception as e:
         print(f"  [!] validate queue write failed: {e}")
+
+def _queue_for_validation(record: dict) -> None:
+    asyncio.create_task(asyncio.to_thread(_queue_for_validation_sync, record))
 
 async def enrich(record: dict) -> dict:
     """
@@ -82,7 +80,7 @@ async def enrich(record: dict) -> dict:
         _cfg = llm_config.task_config("enrich")
 
         try:
-            response = await router.analyze(
+            response = await router.analyse(
                 payload       = {"product": record, "prompt": prompt_text},
                 profile       = "",
                 model_strings = _cfg["models"],
@@ -114,3 +112,13 @@ async def enrich(record: dict) -> dict:
         await _off.save(enriched, enrichment_id=None)
 
     return enriched
+
+async def patch_nutrition(gtin: str, nutrition_data: dict) -> bool:
+    """Update a product's nutrition data directly in the database."""
+    record = await _off.get(gtin)
+    if record:
+        record["nutrition_100g"] = nutrition_data
+        # lookup.save handles preserving the existing enrichment_id
+        await _off.save(record)
+        return True
+    return False
