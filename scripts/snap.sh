@@ -1,20 +1,13 @@
 #!/bin/bash
-#
-#  scripts/snap.sh
-#
-#  Snapshot the codebase and publish to trigzi.com/trigzi_system.txt
-#
-#  Usage: ./scripts/snap.sh
-#
+# scripts/snap.sh — generate per-directory + whole-project tarzan snapshots
+# and structured maps into html/. Run from the project root.
 
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$SCRIPT_DIR/.."
-OUTPUT="$ROOT/html/trigzi_system.txt"
-
-echo "Snapshotting codebase..."
-python3 "$SCRIPT_DIR/tarzan.py" --output "$OUTPUT"
-
-echo ""
-echo "Published: https://trigzi.com/trigzi_system.txt"
+DIRS="core data docs eval prompts providers scripts setup tests utils"
+for d in $DIRS; do
+    scripts/tarzan.py --root "$d" > "html/$d.md"
+    scripts/tarzan.py --map --root "$d" > "html/$d.map"
+done
+scripts/tarzan.py --root . --exclude $DIRS > html/root.md
+scripts/tarzan.py --root . --exclude $DIRS --map > html/root.map
+scripts/tarzan.py --root . > html/full.md
+scripts/tarzan.py --root . --map > html/full.map
