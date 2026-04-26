@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 """
-utils/gtin.py
+=============================================================================
+Module:        GTIN Normalisation
+Location:      utils/gtin.py
+Description:   GTIN normalisation following the Open Food Facts barcode
+               specification. Coerces every barcode variant the scanners
+               might emit (EAN-8, UPC-A, UPC-E, EAN-13, EAN-14) into the
+               canonical 13-digit EAN-13 form, or returns None for any
+               input that's invalid or non-consumer.
 
-GTIN normalisation following Open Food Facts specification.
-
-Algorithm:
+Architecture Note:
+The algorithm:
   - Strip leading zeros to get numeric value
   - < 13 digits → zfill(13)   — covers EAN-8, UPC-A, UPC-E etc.
   - 13 digits   → as-is       — EAN-13 canonical
@@ -15,9 +20,12 @@ Algorithm:
   - No valid digits → None
 
 Reference: https://wiki.openfoodfacts.org/Barcode_normalization
+=============================================================================
 """
 
-from typing import Optional, List
+from __future__ import annotations
+
+from typing import List, Optional
 
 
 def normalise(gtin: str) -> Optional[str]:

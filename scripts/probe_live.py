@@ -1,36 +1,44 @@
 #!/usr/bin/env python3
-# scripts/probe_live.py
 """
-Live provider connectivity diagnostic.
+=============================================================================
+Module:        Live Provider Probe (CLI Diagnostic)
+Location:      scripts/probe_live.py
+Description:   Live provider connectivity diagnostic. Hits each provider's
+               real API to verify credentials, model-list reachability,
+               default-model presence in the live catalogue, round-trip
+               latency, and remaining API credit (where exposed via
+               response headers).
 
-Hits each provider's real API to verify:
-  - API key is valid and accepted
-  - Model list endpoint is reachable
-  - Configured default model exists in the live catalogue
-  - Round-trip latency
-  - Remaining API credit (where exposed via response headers)
-
-NOT a unit test — requires real API keys set in environment.
-Run on demand before a session to confirm provider health.
+Architecture Note:
+NOT a unit test — requires real API keys set in the environment. Run on
+demand before a session to confirm provider health. The terminal-display
+formatting lives here (in _format_model_line) so the core.llm.probe
+layer stays presentation-agnostic.
 
 Usage:
     python scripts/probe_live.py all                # probe all providers
     python scripts/probe_live.py gemini             # probe one provider
     python scripts/probe_live.py gemini claude      # probe subset
     python scripts/probe_live.py                    # show this help
+=============================================================================
 """
 
 import asyncio
-import sys
 import os
+import sys
 
-# Allow running from project root without installing the package
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from core.llm.providers.gemini import GeminiProvider
-from core.llm.providers.claude import ClaudeProvider
-from core.llm.providers.openai import OpenAIProvider
-from core.llm.probe import ProviderStatus
+try:
+    from core.llm.providers.gemini import GeminiProvider
+    from core.llm.providers.claude import ClaudeProvider
+    from core.llm.providers.openai import OpenAIProvider
+    from core.llm.probe import ProviderStatus
+except ImportError:
+    # Allow running from project root without installing the package
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from core.llm.providers.gemini import GeminiProvider
+    from core.llm.providers.claude import ClaudeProvider
+    from core.llm.providers.openai import OpenAIProvider
+    from core.llm.probe import ProviderStatus
 
 
 PROVIDERS = {
@@ -55,6 +63,7 @@ def check_env_keys() -> dict[str, bool]:
 
 
 async def probe_provider(name: str, provider) -> ProviderStatus:
+    """Run probe() on a single provider and return its status snapshot."""
     print(f"  🔍 Probing {name}...")
     status = await provider.probe()
     return status
@@ -75,6 +84,7 @@ def _format_model_line(name: str, metadata: dict) -> str:
 
 
 def print_status(status: ProviderStatus) -> None:
+    """Render a single ProviderStatus snapshot to stdout in human-readable form."""
     icon    = "✅" if status.is_reachable else "❌"
     credit  = f"  credit_remaining={status.credit_remaining}" if status.credit_remaining is not None else ""
     valid   = "✓ default model found" if status.default_model_valid else "✗ DEFAULT MODEL NOT IN CATALOGUE"
@@ -98,6 +108,7 @@ def print_status(status: ProviderStatus) -> None:
 
 
 async def main(targets: list[str]) -> None:
+    """Probe each requested target, print per-provider details and a summary."""
     print("\n── Live Provider Probe ─────────────────────────────────────")
     print(f"   Targets: {', '.join(targets)}\n")
 

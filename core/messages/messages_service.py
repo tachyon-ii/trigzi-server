@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
+"""
+=============================================================================
+Module:        Messages Service
+Location:      core/messages/messages_service.py
+Description:   Central delivery service for all server-side messages.
+               Serves one message per day per device (MOTD semantics).
+               Selection is deterministic on (date, device_id) so repeated
+               polls within the same day always return the same message —
+               no flicker, no surprises.
+
+Architecture Note:
+Dedup is owned by core/sessions.py via motd_due() and
+record_motd_delivered() — a single DATE column in MariaDB, shared
+across all Hypercorn workers, so two workers can't deliver the same
+device's MOTD twice.
+
+Adding a future source:
+    1. Create core/messages/<source>.py with a QUOTES list.
+    2. Import it here and append to _ALL_SOURCES.
+=============================================================================
+"""
+
 from __future__ import annotations
-#
-#  core/messages/messages_service.py
-#
-#  Central delivery service for all server-side messages.
-#
-#  Serves one message per day per device (MOTD semantics).
-#  Selection is deterministic on (date, device_id) so repeated polls
-#  within the same day always return the same message — no flicker,
-#  no surprises. Dedup is owned by core/sessions.py via motd_due()
-#  and record_motd_delivered() — a single DATE column in MariaDB,
-#  shared across all Hypercorn workers.
-#
-#  Adding a future source:
-#    1. Create core/messages/<source>.py with a QUOTES list.
-#    2. Import it here and append to _ALL_SOURCES.
-#
 
 import datetime
 import hashlib
 import logging
 from typing import Optional
 
-from .motd import QUOTES as _MOTD_QUOTES
 from core.sessions import get_or_create_session, motd_due, record_motd_delivered
+from .motd import QUOTES as _MOTD_QUOTES
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,7 @@ def _serialise(msg: dict) -> dict:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-async def get_messages(
+async def get_messages(  # pylint: disable=too-many-arguments,too-many-positional-arguments,unused-argument
     device_id:   str,
     since:       Optional[int] = None,
     context:     Optional[str] = None,
@@ -102,6 +108,10 @@ async def get_messages(
     Args:
         device_id:   X-Device-ID header value. Primary key in sessions.
         since:       Unix timestamp. Reserved for future server-push alerts.
+                     Currently unused (the server returns today's MOTD
+                     unconditionally) — kept in the signature for forward
+                     API stability so iOS clients that already send it
+                     don't break when server-push lands.
         context:     Optional filter, e.g. "motd".
         force:       Skip deduplication. For dev/testing only.
         ip:          Request remote addr, stored on session for abuse detection.
@@ -125,11 +135,11 @@ async def get_messages(
     if not force:
         due = await motd_due(device_id)
         if not due:
-            logger.info(f"Messages: device={device_id[:8]}… already seen today")
+            logger.info("Messages: device=%s… already seen today", device_id[:8])
             return []
 
     if not force:
         await record_motd_delivered(device_id)
 
-    logger.info(f"Messages: device={device_id[:8]}… delivering {chosen['id']}")
+    logger.info("Messages: device=%s… delivering %s", device_id[:8], chosen['id'])
     return [_serialise(chosen)]

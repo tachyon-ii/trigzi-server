@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
+"""
+=============================================================================
+
+Module:        Init
+Location:      core/llm/filters/__init__.py
+Description:   Request and Response normalization layer.
+               Delegates to specific files to maintain separation of concerns.
+
+=============================================================================
+"""
+
 from __future__ import annotations
-#
-#  core/llm/filters/__init__.py
-#  trigzi-backend
-#
-#  Request and Response normalization layer.
-#  Delegates to specific files to maintain separation of concerns.
-#
 
 from .request_filter import (
     RequestFilter,

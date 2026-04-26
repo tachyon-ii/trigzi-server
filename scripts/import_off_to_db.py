@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 """
-scripts/import_off_to_db.py
+=============================================================================
+Module:        Open Food Facts → MariaDB Importer
+Location:      scripts/import_off_to_db.py
+Description:   Imports the raw Open Food Facts JSONL dump into the
+               MariaDB products table. Records pass through the GTIN
+               normaliser, the data-quality-error filter, and the
+               nutrition reconciliation step (kJ↔kcal cross-fill) before
+               batched UPSERT. Dry-run mode dumps JSON + INSERT SQL to
+               stdout without touching the database.
 
-Imports the raw Open Food Facts JSONL dump into the MariaDB products table.
-
-Dry run mode dumps the JSON struct and INSERT SQL to stdout without
-touching the database.
+Architecture Note:
+The OFF dump is ~3.5M records. ``run()`` runs a streaming pipeline
+(parse → extract → batch → UPSERT) that holds one DB connection for
+the whole import so the ``SET autocommit = 0`` / ``DISABLE KEYS`` /
+``DROP INDEX`` bulk-mode settings persist across batches. The UPSERT
+SQL has source-aware semantics: it only overwrites rows whose existing
+``source`` is ``'off'``, leaving Woolworths / enriched rows untouched —
+this lets a fresh OFF import run safely against a populated DB.
 
 Usage:
     # Dry run — first 5 records
@@ -17,17 +28,38 @@ Usage:
 
     # Test 1000 records
     ./scripts/import_off_to_db.py --input /data2000/openfoodfacts-products.jsonl --write --limit 1000
+=============================================================================
 """
 
+# pylint: disable=duplicate-code
+# The JSONL-strip-and-parse loop body is shared with
+# scripts/import_enriched.py and scripts/normalise_enriched_gtins.py.
+# Both scripts are independent CLI tools and the boilerplate is shorter
+# than any reasonable shared helper would be — extracting it would add
+# a callback-style helper that's harder to read than the inline form.
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
 import os
 import sys
-import json
-import argparse
 import time
 from typing import Optional
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from utils.gtin import normalise
+try:
+    from core.db import close_pool, get_pool, init_pool
+    from utils.gtin import normalise
+except ImportError:
+    # Allow running from project root without installing the package
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    # pylint: disable=ungrouped-imports
+    # Duplicated imports across try/except are intentional — pylint sees
+    # them as ungrouped because the sys.path bootstrap sits between, but
+    # the canonical-first / fallback-second pattern requires both.
+    from core.db import close_pool, get_pool, init_pool
+    from utils.gtin import normalise
 
 BATCH_SIZE = 500
 
@@ -108,6 +140,7 @@ SCHEMA_TEMPLATE = {
 
 
 def build_image_url(gtin: str, images: dict) -> str:
+    """Construct the OFF CDN image URL from the per-product images metadata, or ''."""
     if not images or not isinstance(images, dict):
         return ""
     front = images.get('selected', {}).get('front', {})
@@ -126,6 +159,7 @@ def build_image_url(gtin: str, images: dict) -> str:
 
 
 def extract_allergens(tags: list) -> list:
+    """Strip OFF locale prefixes and Title-Case allergen tag names for display."""
     if not tags:
         return []
     result = []
@@ -139,7 +173,9 @@ def extract_allergens(tags: list) -> list:
 
 CATEGORY_BLACKLIST = {'null', 'unknown', ''}
 
+
 def extract_category(tags: list) -> str:
+    """Return the most-specific English category tag, skipping junk values."""
     if not tags:
         return ""
     en_tags = [t for t in tags if t.startswith('en:')]
@@ -153,6 +189,7 @@ def extract_category(tags: list) -> str:
 
 
 def to_float(val) -> Optional[float]:
+    """Coerce a value to float, returning None on any failure."""
     if val is None:
         return None
     try:
@@ -162,6 +199,7 @@ def to_float(val) -> Optional[float]:
 
 
 def to_str(val, maxlen: int = 0) -> str:
+    """Coerce a value to a stripped string, optionally truncated to maxlen."""
     if val is None:
         return ""
     s = str(val).strip()
@@ -169,6 +207,7 @@ def to_str(val, maxlen: int = 0) -> str:
 
 
 def extract(raw: dict) -> Optional[dict]:
+    """Map one OFF JSONL record to the unified product schema, or None to skip it."""
     gtin = normalise(raw.get('code', ''))
     if not gtin:
         return None
@@ -245,7 +284,33 @@ def extract(raw: dict) -> Optional[dict]:
     return record
 
 
-def run(input_file: str, write: bool, limit: int, dry_run: bool) -> None:
+async def run(input_file: str, write: bool, limit: int, dry_run: bool) -> None:
+    """Stream the OFF JSONL into the products table.
+
+    Outer wrapper: handles the pool-acquire lifecycle so the inner worker
+    sees a single live connection (or None for dry-run mode). Splitting
+    this from _run_with_connection keeps the connection scope explicit
+    via ``async with`` rather than manually invoking the dunder protocol.
+    """
+    if write and not dry_run:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await _run_with_connection(input_file, write, limit, dry_run, conn)
+    else:
+        await _run_with_connection(input_file, write, limit, dry_run, None)
+
+
+async def _run_with_connection(input_file: str, write: bool, limit: int,  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,too-many-statements
+                               dry_run: bool, conn) -> None:
+    """Streaming OFF import body — runs against a held connection (or None for dry-run).
+
+    The body is intentionally a single linear pipeline (open → parse →
+    extract → batch → flush → progress → cleanup) rather than decomposed
+    into helpers, since the per-record work is cheap and threading the
+    batch + connection through helper functions would obscure the
+    streaming flow without saving meaningful complexity. The R0912/R0915
+    disables on the function reflect this deliberate architecture.
+    """
     mode = "DRY RUN" if dry_run else "WRITE"
     print(f"OFF Importer — {mode}")
     print(f"  Input : {input_file}")
@@ -257,26 +322,25 @@ def run(input_file: str, write: bool, limit: int, dry_run: bool) -> None:
     errors    = 0
     batch: list[tuple] = []
 
-    conn = None
-    if write and not dry_run:
-        from core.db import get_conn
-        conn = get_conn()
-        with conn.cursor() as cur:
+    if write and not dry_run and conn:
+        async with conn.cursor() as cur:
             for sql in BULK_START:
-                cur.execute(sql)
+                await cur.execute(sql)
         print("  Bulk import mode enabled\n")
 
-    def flush() -> None:
+    async def flush() -> None:
+        """Drain accumulated batch via executemany + commit, then clear it."""
         nonlocal imported
         if not batch or not conn:
             return
-        with conn.cursor() as cur:
-            cur.executemany(UPSERT_SQL, batch)
-        conn.commit()
+        async with conn.cursor() as cur:
+            await cur.executemany(UPSERT_SQL, batch)
+        await conn.commit()
         imported += len(batch)
         batch.clear()
 
     def progress() -> None:
+        """Render a one-line counter to stderr in-place."""
         elapsed = time.time() - t0
         rate    = processed / elapsed if elapsed > 0 else 0
         sys.stdout.write(
@@ -290,58 +354,53 @@ def run(input_file: str, write: bool, limit: int, dry_run: bool) -> None:
 
     t0 = time.time()
 
-    try:
-        with open(input_file, 'rt', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                if limit and processed >= limit:
-                    break
+    with open(input_file, 'rt', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if limit and processed >= limit:
+                break
 
-                processed += 1
+            processed += 1
 
-                try:
-                    raw = json.loads(line)
-                except json.JSONDecodeError:
-                    errors += 1
-                    continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                errors += 1
+                continue
 
-                record = extract(raw)
-                if not record:
-                    skipped += 1
-                    continue
+            record = extract(raw)
+            if not record:
+                skipped += 1
+                continue
 
-                data_json = json.dumps(record, ensure_ascii=False)
-                row = (record['gtin'], record['source'], record['name'], data_json)
+            data_json = json.dumps(record, ensure_ascii=False)
+            row = (record['gtin'], record['source'], record['name'], data_json)
 
-                if dry_run:
-                    print(f"{'─'*60}")
-                    print(f"GTIN   : {record['gtin']}")
-                    print(f"INSERT : ({row[0]!r}, {row[1]!r}, {row[2]!r}, NULL, <data>)")
-                    print(f"JSON   :")
-                    print(json.dumps(record, indent=2, ensure_ascii=False))
-                    print()
-                    imported += 1
-                else:
-                    batch.append(row)
-                    if len(batch) >= BATCH_SIZE:
-                        flush()
+            if dry_run:
+                print(f"{'─'*60}")
+                print(f"GTIN   : {record['gtin']}")
+                print(f"INSERT : ({row[0]!r}, {row[1]!r}, {row[2]!r}, NULL, <data>)")
+                print("JSON   :")
+                print(json.dumps(record, indent=2, ensure_ascii=False))
+                print()
+                imported += 1
+            else:
+                batch.append(row)
+                if len(batch) >= BATCH_SIZE:
+                    await flush()
 
-                if not dry_run and processed % 5_000 == 0:
-                    progress()
+            if not dry_run and processed % 5_000 == 0:
+                progress()
 
-        if not dry_run:
-            flush()
-            if conn:
-                with conn.cursor() as cur:
-                    for sql in BULK_END:
-                        cur.execute(sql)
-                print("\n  Bulk import mode disabled")
-
-    finally:
+    if not dry_run:
+        await flush()
         if conn:
-            conn.close()
+            async with conn.cursor() as cur:
+                for sql in BULK_END:
+                    await cur.execute(sql)
+            print("\n  Bulk import mode disabled")
 
     elapsed = time.time() - t0
     print(f"\nDone in {elapsed:.1f}s")
@@ -349,6 +408,17 @@ def run(input_file: str, write: bool, limit: int, dry_run: bool) -> None:
     print(f"  Imported  : {imported:,}")
     print(f"  Skipped   : {skipped:,}  (invalid GTIN or placeholder name)")
     print(f"  Errors    : {errors}")
+
+
+async def main(input_file: str, write: bool, limit: int, dry_run: bool) -> None:
+    """Stand up the DB pool, run the import, and tear the pool down cleanly."""
+    if write and not dry_run:
+        await init_pool()
+    try:
+        await run(input_file, write, limit, dry_run)
+    finally:
+        if write and not dry_run:
+            await close_pool()
 
 
 if __name__ == '__main__':
@@ -368,4 +438,4 @@ if __name__ == '__main__':
     if not args.write and not args.dry_run:
         args.dry_run = True
 
-    run(args.input, args.write, args.limit, args.dry_run)
+    asyncio.run(main(args.input, args.write, args.limit, args.dry_run))

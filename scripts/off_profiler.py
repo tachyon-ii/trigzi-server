@@ -1,27 +1,35 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 """
-scripts/off_profiler.py
+=============================================================================
+Module:        Open Food Facts Schema Profiler
+Location:      scripts/off_profiler.py
+Description:   Profiles the Open Food Facts JSONL dump schema. For each
+               field of interest, computes:
+                 - Presence % (how many records have the field non-empty)
+                 - Type distribution
+                 - Sample values (to understand actual format)
 
-Profiles the Open Food Facts JSONL dump schema.
+               Output is written to logs/off_schema_profile.txt for
+               reference when writing the OFF importer.
 
-For each field of interest:
-  - Presence % (how many records have this field non-empty)
-  - Type distribution
-  - Sample values (to understand format)
-
-Output is written to logs/off_schema_profile.txt for reference
-when writing the importer.
+Architecture Note:
+This is a one-shot diagnostic, not part of the runtime hot path. Run it
+when the OFF dump format is uncertain or after upstream schema changes.
+The FIELDS_OF_INTEREST dict at module scope is the single source of
+truth for which fields are surveyed; add new groups there.
 
 Usage:
     ./scripts/off_profiler.py /data2000/openfoodfacts-products.jsonl
     ./scripts/off_profiler.py /data2000/openfoodfacts-products.jsonl --samples 50000
+=============================================================================
 """
 
-import json
-import sys
-import os
+from __future__ import annotations
+
 import argparse
+import json
+import os
+import sys
 import time
 from collections import Counter, defaultdict
 from typing import Any
@@ -129,7 +137,19 @@ def value_summary(samples: list) -> str:
     return ' | '.join(seen)
 
 
-def profile(filepath: str, sample_size: int, output_path: str) -> None:
+def profile(filepath: str, sample_size: int, output_path: str) -> None:  # pylint: disable=too-many-statements
+    """Stream-read the OFF JSONL dump and emit a per-field schema profile.
+
+    Walks at most ``sample_size`` records, accumulating presence counts,
+    type distributions, and a handful of example values for every field
+    listed in FIELDS_OF_INTEREST. Renders the result both to stdout and
+    to ``output_path``.
+
+    The body is intentionally linear (parse → accumulate → render → write)
+    rather than decomposed into helpers, since the per-record work is
+    cheap and threading state through helper functions would obscure the
+    streaming flow without saving meaningful complexity.
+    """
     print(f"Profiling: {filepath}")
     print(f"Samples  : {sample_size}")
     print(f"Output   : {output_path}\n")
@@ -185,13 +205,13 @@ def profile(filepath: str, sample_size: int, output_path: str) -> None:
     avg_kb  = (total_bytes / total / 1024) if total else 0
 
     lines = []
-    lines.append(f"OFF Schema Profile")
+    lines.append("OFF Schema Profile")
     lines.append(f"{'='*60}")
     lines.append(f"File     : {filepath}")
     lines.append(f"Records  : {total:,}")
     lines.append(f"Avg size : {avg_kb:.2f} KB/record")
     lines.append(f"Elapsed  : {elapsed:.1f}s ({total/elapsed:.0f} rec/s)")
-    lines.append(f"")
+    lines.append("")
 
     for group, fields in FIELDS_OF_INTEREST.items():
         lines.append(f"{'─'*60}")

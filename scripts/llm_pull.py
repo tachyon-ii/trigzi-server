@@ -1,26 +1,36 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-#
-#  scripts/llm_pull.py
-#
-#  Stage 2: Parse a raw LLM response file -> validate -> pretty print.
-#
-#  Can be run repeatedly against the same response file to iterate
-#  the parser without re-calling the LLM. Response files are the
-#  regression test corpus. Works with responses from any provider --
-#  model is read from the # MODEL: header written by llm_push.py.
-#
-#  Usage:
-#      ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt
-#      ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt --strict
-#      ./scripts/llm_pull.py logs/llm_responses/*.txt   # batch
-#
+"""
+=============================================================================
+Module:        LLM Response Parser (Stage 2)
+Location:      scripts/llm_pull.py
+Description:   Stage 2 of the LLM round-trip pipeline. Parses a raw LLM
+               response file, validates it against the strict field
+               schema, coerces values to their target types, and emits
+               the result as a unified product-JSON document.
 
-import os
-import sys
-import re
-import json
+Architecture Note:
+This is the offline counterpart to scripts/llm_push.py — push writes a
+prompt and captures the response, pull replays the captured response
+through the parser. Decoupling the two means the parser can be iterated
+against a fixed regression corpus (logs/llm_responses/*.txt) without
+re-calling the LLM. The provider-agnostic ``# MODEL:`` header written
+by llm_push.py is read here so per-model behaviour stays attached to
+the response file rather than being inferred from filename conventions.
+
+Usage:
+    ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt
+    ./scripts/llm_pull.py logs/llm_responses/1743000000_9310077217814.txt --strict
+    ./scripts/llm_pull.py logs/llm_responses/*.txt   # batch
+=============================================================================
+"""
+
+from __future__ import annotations
+
 import argparse
+import json
+import os
+import re
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -173,13 +183,13 @@ def to_schema(coerced: dict, gtin: str, model: str) -> dict:
     }
 
 
-def process_file(path: str, strict: bool) -> bool:
+def process_file(file_path: str, strict: bool) -> bool:
     """Process one response file. Returns True if valid."""
     print(f"\n{'='*60}")
-    print(f"FILE: {path}")
+    print(f"FILE: {file_path}")
     print('='*60)
 
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(file_path, 'r', encoding='utf-8') as f:
         text = f.read()
 
     meta  = parse_header(text)
@@ -207,7 +217,7 @@ def process_file(path: str, strict: bool) -> bool:
 
     schema = to_schema(coerced, gtin, model)
 
-    print(f"\nSCHEMA OUTPUT:")
+    print("\nSCHEMA OUTPUT:")
     print(json.dumps(schema, indent=2, ensure_ascii=False))
 
     valid = len(errors) == 0
@@ -215,7 +225,8 @@ def process_file(path: str, strict: bool) -> bool:
     return valid
 
 
-if __name__ == '__main__':
+def main() -> None:
+    """CLI entry point: parse args, process each file, print batch summary."""
     parser = argparse.ArgumentParser(
         description="Stage 2: Parse LLM response -> validate -> pretty print."
     )
@@ -227,14 +238,18 @@ if __name__ == '__main__':
 
     results = []
     for path in args.files:
-        ok = process_file(path, args.strict)
-        results.append((path, ok))
+        is_valid = process_file(path, args.strict)
+        results.append((path, is_valid))
 
     if len(results) > 1:
         print(f"\n{'='*60}")
-        print(f"BATCH SUMMARY: {sum(1 for _, ok in results if ok)}/{len(results)} passed")
-        for path, ok in results:
-            print(f"  {'PASS' if ok else 'FAIL'}  {os.path.basename(path)}")
+        print(f"BATCH SUMMARY: {sum(1 for _, v in results if v)}/{len(results)} passed")
+        for path, is_valid in results:
+            print(f"  {'PASS' if is_valid else 'FAIL'}  {os.path.basename(path)}")
 
-    if args.strict and not all(ok for _, ok in results):
+    if args.strict and not all(v for _, v in results):
         sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,19 +1,31 @@
-#!/usr/bin/env python3
-#
-#  core/messages/motd.py
-#
-#  MOTD message data. One entry type within the broader messages system.
-#  Pure data — no logic, no imports.
-#
-#  Schema per entry:
-#    id      (str)       Stable unique ID. Never reuse a retired ID.
-#    title   (str)       Display title.
-#    body    (str)       Body text. Keep under ~160 chars.
-#    type    (str)       "info" | "alert" | "warning"
-#    context (str)       Always "motd" for this source.
-#    tags    (list[str]) Optional. Day names e.g. ["monday"].
-#                        Tagged entries only serve on the matching weekday.
-#
+# pylint: disable=line-too-long
+"""
+=============================================================================
+Module:        MOTD Message Catalogue
+Location:      core/messages/motd.py
+Description:   Pure data file holding the message-of-the-day quote pool.
+               One entry type within the broader messages system. No logic,
+               no imports — every entry is consumed by
+               core/messages/messages_service.py via the QUOTES list.
+
+Architecture Note:
+The line-too-long pylint check is disabled at the module level because
+this file is hand-tuned aphorism content — entries are sized to the
+schema's 160-char body budget, which is wider than the project-wide
+140-char code limit. Disabling the check here lets content writers
+focus on cadence and rhythm without fighting the linter on every
+above-average sentence.
+
+Schema per entry:
+    id      (str)        Stable unique ID. Never reuse a retired ID.
+    title   (str)        Display title.
+    body    (str)        Body text. Keep under ~160 chars.
+    type    (str)        "info" | "alert" | "warning"
+    context (str)        Always "motd" for this source.
+    tags    (list[str])  Optional. Day names e.g. ["monday"].
+                         Tagged entries only serve on the matching weekday.
+=============================================================================
+"""
 
 QUOTES: list[dict] = [
 

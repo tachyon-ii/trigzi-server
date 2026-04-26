@@ -1,4 +1,18 @@
-# core/llm/providers/openai.py
+"""
+=============================================================================
+Module:        OpenAI Provider
+Location:      core/llm/providers/openai.py
+Description:   Concrete BaseProvider implementation for OpenAI.
+               Wires the request/response filters, probe mixin, and the
+               /v1/chat/completions endpoint together with Bearer auth.
+
+Architecture Note:
+This class is a thin glue layer over BaseProvider — all transport,
+retry, and failover logic lives upstream. Its only responsibility
+is to bind OpenAI-specific URL, headers, and filter instances.
+=============================================================================
+"""
+
 import os
 from .base import BaseProvider
 from ..filters import OpenAIRequestFilter, OpenAIResponseFilter
@@ -7,6 +21,7 @@ from ..probe import OpenAIProbeMixin
 
 
 class OpenAIProvider(OpenAIProbeMixin, BaseProvider):
+    """OpenAI provider client. See :class:`BaseProvider` for the contract."""
 
     @property
     def provider_name(self) -> str:

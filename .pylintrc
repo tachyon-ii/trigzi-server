@@ -1,0 +1,12 @@
+# .pylintrc
+
+[MASTER]
+init-hook='import sys, pathlib; sys.path.insert(0, str(pathlib.Path(".").resolve()))'
+
+[FORMAT]
+max-line-length = 140
+
+[MESSAGES CONTROL]
+disable=
+    broad-exception-caught,
+    too-many-locals

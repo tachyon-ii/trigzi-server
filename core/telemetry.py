@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 """
 core/telemetry.py
 
@@ -14,6 +13,7 @@ Logging helpers:
     log_ocr_scan()    — dual-capture OCR scan input
     log_unmatched()   — unmatched GTIN (product acquisition queue)
 """
+from __future__ import annotations
 
 import os
 import time
@@ -99,6 +99,7 @@ def log_unmatched(gtin: str) -> None:
 @telemetry_bp.route('/api/v1/telemetry/unmatched/gtin', methods=['POST'])
 @telemetry_bp.route('/api/v1/telemetry/unmatched/<gtin>', methods=['GET'])
 async def telemetry_unmatched(gtin=None):
+    """Log and unmatched GTIN so we can add it if common."""
     if gtin is None:
         data = await request.get_json(silent=True) or {}
         gtin = data.get('term', '').strip()

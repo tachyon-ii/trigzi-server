@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
+"""
+core/enricher.py
+
+LLM enrichment pipeline for raw product records.
+Fully async — no _run() bridge needed.
+
+Writes enrichment_id FK back to products so the exact prompt×model
+that produced each clinical profile is permanently recorded.
+
+"""
 from __future__ import annotations
-#
-#  core/enricher.py
-#
-#  LLM enrichment pipeline for raw product records.
-#  Fully async — no _run() bridge needed.
-#
-#  Writes enrichment_id FK back to products so the exact prompt×model
-#  that produced each clinical profile is permanently recorded.
-#
 
 import os
 import json

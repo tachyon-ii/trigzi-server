@@ -1,19 +1,42 @@
-#
-#  tests/test_enricher.py
-#
-#  Unit tests for core/enricher.py
-#  All LLM router calls, DB calls, and file I/O are mocked.
-#
-#  IMPORTANT: MOCK_ROUTER_RESPONSE mirrors what BaseProvider.analyse()
-#  actually returns: `result` is the raw flat-text string, and
-#  `parsed_blocks` carries the structured dict produced by
-#  SchemaValidator.extract_blocks().
-#
+"""
+=============================================================================
+Module:        Test — Enricher Pipeline
+Location:      tests/test_enricher.py
+Description:   Unit tests for core/enricher.py — the LLM-driven product
+               enrichment pipeline that takes a raw OFF/Woolworths/Coles
+               record and asks the router for clinical and dietary
+               annotations (FODMAP, gluten, allergens, etc.). All LLM
+               router calls, DB calls, and file I/O are mocked.
 
+Architecture Note:
+The MOCK_ROUTER_RESPONSE shape mirrors what BaseProvider.analyse()
+actually returns:
+  - ``result``        — the raw flat-text string from the LLM
+  - ``parsed_blocks`` — the structured dict produced by
+                        SchemaValidator.extract_blocks()
+
+Tests cover four areas:
+  - Happy path: enrich → router → save sequence
+  - Field correctness: which kwargs go into router.analyse / get_or_create_enrichment
+  - Clinical coercion: _coerce_clinical normalises LLM-emitted shapes
+  - Validation queue: _queue_for_validation_sync writes JSONL safely
+                      and survives I/O failures
+=============================================================================
+"""
+
+# Test files use different conventions to library code; pylint relaxations:
+#   missing-class-docstring  — test class names ARE the docstring
+#   missing-function-docstring — test method names ARE the docstring
+#   import-outside-toplevel — methods import lazily to scope mock.patch / defer slow loads
+#   redefined-outer-name   — pytest fixture pattern: fixture & param share name
+#   unused-argument        — Mock side_effect callbacks take *args, **kwargs they don't read
+# pylint: disable=missing-class-docstring,missing-function-docstring,import-outside-toplevel,redefined-outer-name,unused-argument
+
+import os
+import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 
-import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
@@ -127,7 +150,7 @@ class TestEnrichFood(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fodmap rating", kwargs["expected_keys"])
 
     async def test_calls_get_or_create_enrichment(self):
-        from core.enricher import enrich, PROMPT_VER
+        from core.enricher import enrich
 
         with patch("core.enricher.router.analyse", AsyncMock(return_value=MOCK_ROUTER_RESPONSE)), \
              patch("core.enricher.get_or_create_enrichment", return_value=7) as mock_enrich_id, \
@@ -317,11 +340,10 @@ class TestQueueForValidation(unittest.TestCase):
 
     def test_writes_json_line(self):
         from core.enricher import _queue_for_validation_sync
-        import json
 
         written = []
         m = mock_open()
-        m.return_value.__enter__.return_value.write = lambda s: written.append(s)
+        m.return_value.__enter__.return_value.write = written.append
 
         with patch("builtins.open", m), \
              patch("os.makedirs"):

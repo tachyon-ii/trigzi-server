@@ -1,14 +1,34 @@
-#!/usr/bin/env python3
-#
-# tests/test_llm_providers.py
-#
-# Validates that core/llm/llm_providers.json is strictly valid JSON
-# and conforms to the required application schema.
-#
+# Test files use different conventions to library code; pylint relaxations:
+#   missing-class-docstring  — test class names ARE the docstring (TestGTINNormalisation)
+#   missing-function-docstring — test method names ARE the docstring
+#   import-outside-toplevel — methods import lazily to scope mock.patch / defer slow loads
+#   redefined-outer-name   — pytest fixture pattern: fixture & param share name
+#   unused-argument        — Mock side_effect callbacks take *args, **kwargs they don't read
+# pylint: disable=missing-class-docstring,missing-function-docstring,import-outside-toplevel,redefined-outer-name,unused-argument
+"""
+=============================================================================
+Module:        Test — LLM Providers JSON Schema
+Location:      tests/test_llm_providers.py
+Description:   Treats core/llm/llm_providers.json as a contract: it
+               must parse as JSON, contain top-level "providers" and
+               "routing" dicts, every routing block must declare
+               models/optimize/timeout, and every provider block must
+               declare defaultModel and a hierarchy list. A missing or
+               malformed entry would silently break the router at
+               runtime, so a failing test here is the cheap signal.
 
-import os
+Architecture Note:
+The tests open llm_providers.json fresh per case rather than caching
+in setUp — keeps each test independent so a single failure surfaces
+the specific schema rule that's broken without cascading. No mocking;
+this is a structural/data-validation suite, not a behavioural one.
+=============================================================================
+"""
+
 import json
+import os
 import unittest
+
 
 class TestLLMProvidersJSON(unittest.TestCase):
     def setUp(self):
@@ -32,7 +52,7 @@ class TestLLMProvidersJSON(unittest.TestCase):
         """Ensure the top-level structure contains 'providers' and 'routing'."""
         with open(self.filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
+
         self.assertIn("providers", data, "Missing 'providers' key at the top level.")
         self.assertIn("routing", data, "Missing 'routing' key at the top level.")
         self.assertIsInstance(data["providers"], dict)
@@ -42,12 +62,12 @@ class TestLLMProvidersJSON(unittest.TestCase):
         """Ensure every routing block has models, optimize, and timeout."""
         with open(self.filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
+
         for task, config in data["routing"].items():
             self.assertIn("models", config, f"Task '{task}' is missing 'models' array.")
             self.assertIsInstance(config["models"], list, f"Task '{task}' 'models' must be a list.")
             self.assertTrue(len(config["models"]) > 0, f"Task '{task}' 'models' list cannot be empty.")
-            
+
             self.assertIn("optimize", config, f"Task '{task}' is missing 'optimize'.")
             self.assertIn("timeout", config, f"Task '{task}' is missing 'timeout'.")
 
@@ -55,11 +75,12 @@ class TestLLMProvidersJSON(unittest.TestCase):
         """Ensure every provider block has a defaultModel and hierarchy."""
         with open(self.filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            
+
         for provider, config in data["providers"].items():
             self.assertIn("defaultModel", config, f"Provider '{provider}' missing 'defaultModel'.")
             self.assertIn("hierarchy", config, f"Provider '{provider}' missing 'hierarchy'.")
             self.assertIsInstance(config["hierarchy"], list)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

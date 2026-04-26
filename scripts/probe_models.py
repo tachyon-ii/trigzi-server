@@ -59,8 +59,16 @@ _THIS_DIR    = Path(__file__).resolve().parent
 _PROJECT_DIR = _THIS_DIR.parent
 _OUTPUT_PATH = _PROJECT_DIR / "data" / "model_hierarchy.json"
 
-# Make core/ importable
-sys.path.insert(0, str(_PROJECT_DIR))
+try:
+    from core.llm.providers.gemini import GeminiProvider
+    from core.llm.providers.claude import ClaudeProvider
+    from core.llm.providers.openai import OpenAIProvider
+except ImportError:
+    # Allow running from project root without installing the package
+    sys.path.insert(0, str(_PROJECT_DIR))
+    from core.llm.providers.gemini import GeminiProvider
+    from core.llm.providers.claude import ClaudeProvider
+    from core.llm.providers.openai import OpenAIProvider
 
 
 # ---------------------------------------------------------------------------
@@ -294,10 +302,6 @@ async def _gather_models() -> dict[str, list[str]]:
     provider returns clean model identifiers in `available_models`. No
     normalization or suffix stripping is needed here.
     """
-    from core.llm.providers.gemini import GeminiProvider
-    from core.llm.providers.claude import ClaudeProvider
-    from core.llm.providers.openai import OpenAIProvider
-
     provider_classes = {
         "gemini": GeminiProvider,
         "claude": ClaudeProvider,
@@ -335,6 +339,12 @@ async def _gather_models() -> dict[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 class BuildResult(NamedTuple):
+    """Outcome of classifying probed model names against TIER_PATTERNS.
+
+    Splits the probed pool into three buckets — successfully ranked,
+    deliberately skipped (non-chat endpoints), and unknown (no pattern
+    matched, requires human intervention before the JSON can be written).
+    """
     ranked:  dict[str, dict]    # name -> {tier, label, fidelity, ...}
     skipped: dict[str, dict]    # name -> {provider, reason}
     unknown: list[tuple[str, str]]  # [(provider, name), ...] — abort triggers
@@ -386,6 +396,11 @@ def _build(probe_results: dict[str, list[str]]) -> BuildResult:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    """Probe all configured providers, classify their models, and emit the hierarchy JSON.
+
+    Aborts with exit code 2 if any model name fails to match a tier pattern —
+    unknown models require human intervention rather than silent default ranking.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[3].strip())
     ap.add_argument("--write",   action="store_true",
                     help=f"Write output to {_OUTPUT_PATH.relative_to(_PROJECT_DIR)} (default: dry-run to stdout)")
@@ -393,7 +408,7 @@ def main() -> int:
                     help="Also print the skipped models and their reasons")
     args = ap.parse_args()
 
-    print(f"── Probing providers for available models ──", file=sys.stderr)
+    print("── Probing providers for available models ──", file=sys.stderr)
     probe_results = asyncio.run(_gather_models())
 
     total = sum(len(v) for v in probe_results.values())
@@ -436,14 +451,14 @@ def main() -> int:
     for info in result.ranked.values():
         by_tier[info["tier"]] = by_tier.get(info["tier"], 0) + 1
     print("", file=sys.stderr)
-    print(f"── Hierarchy summary ──", file=sys.stderr)
+    print("── Hierarchy summary ──", file=sys.stderr)
     for tier in ("frontier", "flagship", "fast", "utility", "legacy"):
         print(f"   {tier:9s} {by_tier.get(tier, 0):3d} models", file=sys.stderr)
     print(f"   skipped   {len(result.skipped):3d} models (non-chat endpoints)", file=sys.stderr)
 
     if args.verbose:
         print("", file=sys.stderr)
-        print(f"── Skipped models ──", file=sys.stderr)
+        print("── Skipped models ──", file=sys.stderr)
         for name, info in sorted(result.skipped.items()):
             print(f"   {info['reason']:18s}  {info['provider']:8s}  {name}", file=sys.stderr)
 

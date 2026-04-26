@@ -1,17 +1,26 @@
-#
-#  core/llm/filters/xml_filter.py
-#  trigzi-backend
-#
-#  Standalone JSON ↔ XML converter used by the filter pipeline.
-#  Lives outside any provider so it can be reused for audit, replay,
-#  or any future context that needs format conversion.
-#
-#  JSON → XML: converts the AnalysisResult schema into Claude-friendly
-#  XML structure with <task>, <schema>, and <thinking> scaffolding.
-#
-#  XML → JSON: not needed for current flow (providers return JSON)
-#  but included for audit replay and future use.
-#
+"""
+=============================================================================
+Module:        XML Filter
+Location:      core/llm/filters/xml_filter.py
+Description:   Standalone JSON ↔ XML converter used by the filter pipeline.
+               Lives outside any provider so it can be reused for audit,
+               replay, or any future context that needs format conversion.
+
+JSON → XML scaffolds the AnalysisResult schema into a Claude-friendly
+structure with <task>, <output_schema>, <thinking>, and <instructions>
+blocks to encourage stepwise reasoning before the final JSON output.
+
+XML → JSON is not needed for the current flow (providers return JSON
+directly) but is included here for audit replay and future use.
+
+Architecture Note:
+This filter is invoked by ResponseFilter.strip_thinking when decoding
+Claude responses, and may be invoked at request build time when the
+caller wants to scaffold a JSON schema with <thinking> guidance. It is
+deliberately format-agnostic with respect to which provider's response
+it is processing — its only contract is "well-formed XML in, payload out".
+=============================================================================
+"""
 
 import json
 import re
@@ -52,8 +61,8 @@ class XMLFilter:
     @staticmethod
     def json_schema_to_xml(json_str: str, task_description: str) -> str:
         """
-        Wraps a JSON schema string in XML structure that Claude responds 
-        well to. The <thinking> tag instructs Claude to reason before 
+        Wraps a JSON schema string in XML structure that Claude responds
+        well to. The <thinking> tag instructs Claude to reason before
         producing the answer.
         """
         return f"""<task>
@@ -84,7 +93,7 @@ Strip your thinking — return only the final JSON object.
         """
         try:
             obj = json.loads(json_str)
-            return XMLFilter._serialize_to_xml(obj, indent=0)
+            return XMLFilter.serialize_to_xml(obj, indent=0)
         except json.JSONDecodeError:
             return f"<raw>{json_str}</raw>"
 
@@ -116,40 +125,42 @@ Strip your thinking — return only the final JSON object.
         """Removes <thinking>…</thinking> from raw provider responses."""
         return XMLFilter._strip_xml_tag("thinking", response)
 
-    # MARK: - Private helpers
+    # MARK: - Serialization
 
     @staticmethod
-    def _serialize_to_xml(value: Any, indent: int) -> str:
+    def serialize_to_xml(value: Any, indent: int) -> str:
+        """Recursive walker that emits indented XML for dict/list/str/None values."""
         pad = "  " * indent
 
         if isinstance(value, dict):
             items = []
             for key in sorted(value.keys()):
                 val = value[key]
-                inner = XMLFilter._serialize_to_xml(val, indent + 1)
+                inner = XMLFilter.serialize_to_xml(val, indent + 1)
                 is_complex = isinstance(val, (list, dict))
-                
+
                 if is_complex:
                     items.append(f"{pad}<{key}>\n{inner}\n{pad}</{key}>")
                 else:
                     items.append(f"{pad}<{key}>{inner}</{key}>")
             return "\n".join(items)
 
-        elif isinstance(value, list):
+        if isinstance(value, list):
             items = []
             for idx, item in enumerate(value):
-                inner = XMLFilter._serialize_to_xml(item, indent + 1)
+                inner = XMLFilter.serialize_to_xml(item, indent + 1)
                 items.append(f'{pad}<item index="{idx}">\n{inner}\n{pad}</item>')
             return "\n".join(items)
 
-        elif isinstance(value, str):
+        if isinstance(value, str):
             return value
 
-        elif value is None:
+        if value is None:
             return ""
 
-        else:
-            return str(value)
+        return str(value)
+
+    # MARK: - Private helpers
 
     @staticmethod
     def _strip_xml_tag(tag: str, text: str) -> str:
@@ -172,8 +183,8 @@ Strip your thinking — return only the final JSON object.
 # with imports in filters/__init__.py and test_filters.py
 
 def dict_to_xml(data: dict) -> str:
-    """Delegate to XMLFilter._serialize_to_xml for dict → XML conversion."""
-    return XMLFilter._serialize_to_xml(data, indent=0)
+    """Delegate to XMLFilter.serialize_to_xml for dict → XML conversion."""
+    return XMLFilter.serialize_to_xml(data, indent=0)
 
 
 def wrap_in_tag(tag: str, content: str) -> str:

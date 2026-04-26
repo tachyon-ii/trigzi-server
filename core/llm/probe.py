@@ -1,22 +1,30 @@
-# core/llm/probe.py
 """
-Provider health-check and introspection layer.
+=============================================================================
+Module:        Provider Probe
+Location:      core/llm/probe.py
+Description:   Provider health-check and introspection layer. Implements
+               probe() for each provider — a lightweight call that hits
+               the provider's model-list endpoint, measures round-trip
+               latency, returns the list of available models with
+               per-model metadata where exposed, validates the configured
+               default model is in that list, and reports remaining API
+               credit where available via response headers.
 
-Implements probe() for each provider — a lightweight operation that:
-  1. Hits the provider's model-list endpoint to confirm reachability
-  2. Measures round-trip latency
-  3. Returns the list of available models (clean identifiers only)
-  4. Returns per-model metadata where the provider exposes it
-  5. Validates that the configured default model is in that list
-  6. Reports remaining API credit where available via response headers
+               ProbeScheduler wraps probe() for all registered providers,
+               running it once on startup (before the first request is
+               served) and periodically on a configurable interval
+               (default 5 minutes).
 
+Architecture Note:
 Credit remaining is also updated on every normal analyse() call via
 BaseProvider._update_credit_from_headers() — probe() initialises the
 field but does not block on it.
 
-ProbeScheduler runs probe() for all registered providers:
-  - Once on startup (before the first request is served)
-  - Periodically on a configurable interval (default: 5 minutes)
+Data/presentation separation: available_models is a list of clean model
+identifiers (no padding, no date suffixes, no terminal formatting).
+Per-model metadata (e.g. OpenAI's `created` timestamp) lives in
+model_metadata, keyed by model name. Display formatting is the
+responsibility of the caller (e.g. scripts/probe_live.py).
 
 Usage:
     from core.llm.probe import scheduler
@@ -24,30 +32,30 @@ Usage:
     await scheduler.start()            # call once at Flask app startup
     status = scheduler.status("gemini")
     all    = scheduler.all_status()
-
-Data/presentation separation (April 2026):
-    available_models is a list of clean model identifiers — no padding,
-    no date suffixes, no terminal formatting. Per-model metadata
-    (e.g. OpenAI's `created` timestamp) lives in model_metadata, keyed
-    by model name. Display formatting is the responsibility of the
-    caller (e.g. scripts/probe_live.py).
+=============================================================================
 """
 
 import asyncio
+import os
 import time
-import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
+import aiohttp
 
 
 # MARK: - ProviderStatus
 
 @dataclass
-class ProviderStatus:
+class ProviderStatus:  # pylint: disable=too-many-instance-attributes
     """
     Snapshot of a provider's health at a point in time.
     Produced by probe() and cached by ProbeScheduler.
+
+    The 9 attributes are intentional — this is a record type, not a
+    behaviour-bearing object, and pylint's 7-attribute threshold is a
+    code-smell heuristic that doesn't apply to dataclasses serving as
+    structured snapshots.
     """
     provider:              str
     is_reachable:          bool
@@ -77,10 +85,13 @@ class ProviderStatus:
 
 # MARK: - Probe mixin (added to BaseProvider)
 
-class ProbeMixin:
+class ProbeMixin:  # pylint: disable=too-few-public-methods
     """
     Mixin that adds probe() to any provider.
     Concrete providers must implement _models_url() and _model_name_key().
+
+    The single-public-method shape is intentional: probe() is the entire
+    contract this mixin contributes to the provider class hierarchy.
     """
 
     # Override in each provider
@@ -176,11 +187,14 @@ class ProbeMixin:
                 names.append(name)
         return sorted(names)
 
-    def _extract_model_metadata(self, data: dict) -> Dict[str, dict]:
+    def _extract_model_metadata(self, data: dict) -> Dict[str, dict]:  # pylint: disable=unused-argument
         """
         Extract per-model metadata keyed by model name. Default is empty —
         providers with structured per-model info (e.g. OpenAI's release
         timestamps) override this. Schema is provider-specific.
+
+        ``data`` is unused in the base implementation but is part of the
+        contract subclasses must satisfy when overriding.
         """
         return {}
 
@@ -211,9 +225,10 @@ class ProbeMixin:
 
 # MARK: - Per-provider probe mixins
 
-class GeminiProbeMixin(ProbeMixin):
+class GeminiProbeMixin(ProbeMixin):  # pylint: disable=too-few-public-methods
+    """Probe mixin for Google Gemini's `generativelanguage.googleapis.com` endpoint."""
+
     def _models_url(self) -> str:
-        import os
         key = os.environ.get("GEMINI_API_KEY", "")
         return f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
 
@@ -222,15 +237,15 @@ class GeminiProbeMixin(ProbeMixin):
 
     def _extract_model_names(self, data: dict) -> List[str]:
         """
-        Aggressively filter the Gemini model list to return 
+        Aggressively filter the Gemini model list to return
         only stable, text-capable reasoning engines.
         """
         valid_models = []
-        
+
         # Exclusion list to strip multimodal, experimental, and embedding noise
         noise_filters = [
-            "preview", "audio", "vision", "embedding", "imagen", 
-            "veo", "lyria", "nano-banana", "aqa", "robotics", 
+            "preview", "audio", "vision", "embedding", "imagen",
+            "veo", "lyria", "nano-banana", "aqa", "robotics",
             "tts", "computer-use", "001" # Drops legacy static versions in favor of 'latest' aliases
         ]
 
@@ -238,25 +253,26 @@ class GeminiProbeMixin(ProbeMixin):
             # 1. API Capability check: Must be a text generator
             if "generateContent" not in model.get("supportedGenerationMethods", []):
                 continue
-            
+
             # Strip the arbitrary Google prefix
             name = model.get("name", "").replace("models/", "")
-            
+
             # 2. Semantic name check: Drop the laboratory noise
             if any(noise in name.lower() for noise in noise_filters):
                 continue
-                
+
             valid_models.append(name)
 
         return sorted(valid_models)
 
 
-class ClaudeProbeMixin(ProbeMixin):
+class ClaudeProbeMixin(ProbeMixin):  # pylint: disable=too-few-public-methods
+    """Probe mixin for Anthropic Claude's `/v1/models` endpoint."""
+
     def _models_url(self) -> str:
         return "https://api.anthropic.com/v1/models"
 
     def _models_request_kwargs(self) -> dict:
-        import os
         return {"headers": {
             "x-api-key":         os.environ.get("CLAUDE_API_KEY", ""),
             "anthropic-version": "2023-06-01"
@@ -266,12 +282,13 @@ class ClaudeProbeMixin(ProbeMixin):
         return "id"   # Claude returns {"id": "claude-sonnet-4-6", ...}
 
 
-class OpenAIProbeMixin(ProbeMixin):
+class OpenAIProbeMixin(ProbeMixin):  # pylint: disable=too-few-public-methods
+    """Probe mixin for OpenAI's `/v1/models` endpoint."""
+
     def _models_url(self) -> str:
         return "https://api.openai.com/v1/models"
 
     def _models_request_kwargs(self) -> dict:
-        import os
         return {"headers": {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}"
         }}
@@ -395,7 +412,12 @@ def init_scheduler(registry: Dict, interval_s: float = 300.0) -> ProbeScheduler:
         from core.llm.probe import init_scheduler, scheduler
         init_scheduler(router.registry)
         await scheduler.start()
+
+    The ``global scheduler`` statement is required because this function
+    is the singleton's lazy initialiser — it deliberately reassigns the
+    module-level binding so subsequent ``from core.llm.probe import scheduler``
+    imports see the live instance.
     """
-    global scheduler
+    global scheduler  # pylint: disable=global-statement
     scheduler = ProbeScheduler(registry, interval_s)
     return scheduler

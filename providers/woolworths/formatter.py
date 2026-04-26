@@ -1,11 +1,30 @@
-import json
+"""
+=============================================================================
+Module:        Woolworths Formatter
+Location:      providers/woolworths/formatter.py
+Description:   Maps the raw Woolworths Search API payload into the strict
+               iOS ProductJSON schema. Owns all field-name translation
+               (Woolworths' camelCase → snake_case), nutrition parsing,
+               ingredient NLP, and category mapping for this provider.
+
+Architecture Note:
+This module is the inverse of providers/woolworths/client.py — client.py
+fetches the upstream payload, formatter.py reshapes it. Together they
+form one provider plug-in. New supermarket providers follow the same
+two-file split (client + formatter) so dependencies on upstream JSON
+shape are quarantined inside one module per provider.
+=============================================================================
+"""
+
 from utils import ingredient_parser
 from utils import nutrition
 from utils import category_mapper
 
+
 def clean_string(val) -> str:
     """Ensures a value is a string and strips whitespace."""
     return str(val).strip() if val else ""
+
 
 def extract_hsr(attrs: dict) -> float:
     """Safely extracts the Health Star Rating as a float."""
@@ -17,24 +36,25 @@ def extract_hsr(attrs: dict) -> float:
             pass
     return None
 
+
 def normalize(data: dict):
     """Maps the raw Woolworths payload directly into the strict iOS ProductJSON schema."""
     for bundle in (data.get("Products") or []):
         for p in bundle.get("Products", []):
             attrs = p.get("AdditionalAttributes", {}) or {}
-            
+
             # Skip non-food marketplace items
             if p.get("IsMarketProduct", False):
                 continue
 
             gtin = clean_string(p.get("Barcode"))
             raw_ingredients = clean_string(attrs.get('ingredients'))
-            
+
             # Use the V2 NLP Parser (returns a flat list of strings natively)
             flat_ingredients = ingredient_parser.parse_ingredients(raw_ingredients) if raw_ingredients else []
-            
+
             macros_100g, _, serving_size, servings_per_pack = nutrition.parse_woolworths(attrs.get('nutritionalinformation'))
-            
+
             cat_name = clean_string(attrs.get('sapdepartmentname'))
             sub_name = clean_string(attrs.get('sapcategoryname'))
             canonical_cat, canonical_sub = category_mapper.map_woolworths(cat_name, sub_name)
@@ -51,18 +71,18 @@ def normalize(data: dict):
                 "health_star_rating": extract_hsr(attrs),
                 "serving_size_g": serving_size,
                 "servings_per_pack": servings_per_pack,
-                
+
                 "nutrition_100g": macros_100g if macros_100g else None,
                 "raw_ingredients": raw_ingredients,
                 "parsed_ingredients": flat_ingredients,
-                
+
                 # Baseline Clinical Profile for un-enriched live scans
                 "clinical_profile": None,
-                
+
                 # Baseline Metadata
                 "_source_id": gtin,
                 "_source_name": "woolworths_api",
                 "_enrichment_llm": "pending"
             }
-            
+
     return None

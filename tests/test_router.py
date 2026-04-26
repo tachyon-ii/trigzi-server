@@ -1,16 +1,45 @@
-#
-#  test/test_router.py
-#  trigzi-backend
-#
-#  Functional tests for the LLM Router orchestrator.
-#  Uses async mocking to simulate multi-provider environments.
-#
+"""
+=============================================================================
+Module:        Test — LLM Router Orchestration
+Location:      tests/test_router.py
+Description:   Functional tests for the multi-provider LLM router. Uses
+               async mocking to simulate race / failover / cost routing
+               scenarios end-to-end without hitting real APIs. The router
+               is the central dispatch point for every LLM call in the
+               system; getting its strategy semantics wrong silently
+               degrades resilience or cost-efficiency in production.
 
-import unittest
+Architecture Note:
+Each test patches the providers' analyse() methods on the live
+router.registry to inject controlled responses, then asserts on the
+router's selection / fallback / cost-optimisation behaviour. The
+router itself is never re-instantiated — these are integration tests
+against the module-level singleton.
+
+The four routing strategies covered:
+  - race:     fastest wins, others cancelled
+  - failover: tries the chain in order; advances on failoverable errors,
+              halts on terminal errors
+  - cost:     picks cheapest model across providers, ignoring list order
+  - (ab is exercised in router.test_ab via direct unit tests, not here)
+=============================================================================
+"""
+
+# Test files use different conventions to library code; pylint relaxations:
+#   missing-class-docstring  — test class names ARE the docstring (TestLLMRouter)
+#   missing-function-docstring — test method names ARE the docstring
+#   import-outside-toplevel — methods import lazily to scope mock.patch / defer slow loads
+#   redefined-outer-name   — pytest fixture pattern: fixture & param share name
+#   unused-argument        — Mock side_effect callbacks take *args, **kwargs they don't read
+# pylint: disable=missing-class-docstring,missing-function-docstring,import-outside-toplevel,redefined-outer-name,unused-argument
+
 import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
-from core.llm.router import router
+import unittest
+from unittest.mock import AsyncMock, patch
+
 from core.llm.errors import LLMError
+from core.llm.router import router
+
 
 class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
 
@@ -30,9 +59,9 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(router.registry["gemini"], "analyse", new_callable=AsyncMock) as mock_gem:
             with patch.object(router.registry["claude"], "analyse", new_callable=AsyncMock) as mock_claude:
-                
+
                 mock_gem.return_value = fast_resp
-                
+
                 # Make Claude wait longer than the test timeout to simulate cancellation
                 async def slow_call(*args, **kwargs):
                     await asyncio.sleep(2)
@@ -41,8 +70,8 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
 
                 # Run race
                 winner = await router.analyse(
-                    self.payload, self.profile, 
-                    model_strings=["gemini", "claude"], 
+                    self.payload, self.profile,
+                    model_strings=["gemini", "claude"],
                     optimize="speed"
                 )
 
@@ -53,18 +82,18 @@ class TestLLMRouter(unittest.IsolatedAsyncioTestCase):
         """Verify failover chain tries next model when the first hits a 5xx/429."""
         with patch.object(router.registry["gemini"], "analyse", new_callable=AsyncMock) as mock_gem:
             with patch.object(router.registry["claude"], "analyse", new_callable=AsyncMock) as mock_claude:
-                
+
                 # Gemini fails with a server error (failoverable)
                 mock_gem.side_effect = LLMError.server_error("Gemini", 500, "Oops")
-                
+
                 # Claude succeeds
                 mock_claude.return_value = {
                     "provider": "Claude", "model": "haiku", "latency_ms": 200, "result": {"safe": True}
                 }
 
                 response = await router.analyse(
-                    self.payload, self.profile, 
-                    model_strings=["gemini", "claude"], 
+                    self.payload, self.profile,
+                    model_strings=["gemini", "claude"],
                     optimize="failover"    # explicit failover — cost now has its own routing path
                 )
 

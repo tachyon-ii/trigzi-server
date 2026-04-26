@@ -1,29 +1,45 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 """
-scripts/normalise_enriched_gtins.py
+=============================================================================
+Module:        Enriched GTIN Normaliser
+Location:      scripts/normalise_enriched_gtins.py
+Description:   Normalises every GTIN in enriched_products.jsonl to the
+               13-digit canonical form via utils/gtin.normalise(). Records
+               with GTINs that fail normalisation are dropped from the
+               output and reported on stderr.
 
-Normalises all GTINs in enriched_products.jsonl to 13 digits
-using utils/gtin.normalise(). Records with invalid GTINs are dropped.
-
-Writes to enriched_products_normalised.jsonl (or --output path).
+Architecture Note:
+A one-shot data-cleaning pass over the enriched JSONL — run it after
+the bulk enrichment job to make every record's gtin field uniform
+before importing into MariaDB. The script is non-destructive: it writes
+to a separate file (default suffix _normalised.jsonl) so the original
+input is preserved for replay.
 
 Usage:
     ./scripts/normalise_enriched_gtins.py --input /data2000/enriched_products.jsonl
-    ./scripts/normalise_enriched_gtins.py --input /data2000/enriched_products.jsonl \
+    ./scripts/normalise_enriched_gtins.py \\
+        --input  /data2000/enriched_products.jsonl \\
         --output /data2000/enriched_products_normalised.jsonl
+=============================================================================
 """
 
+from __future__ import annotations
+
+import argparse
+import json
 import os
 import sys
-import json
-import argparse
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from utils.gtin import normalise
+try:
+    from utils.gtin import normalise
+except ImportError:
+    # Allow running from project root without installing the package
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from utils.gtin import normalise
 
 
 def run(input_path: str, output_path: str) -> None:
+    """Stream the input JSONL, normalise each record's GTIN, and write the survivors out."""
     print(f"Input  : {input_path}")
     print(f"Output : {output_path}\n")
 

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 """
 =============================================================================
 Module:        LLM Analyser
@@ -7,15 +6,26 @@ Location:      core/analyser.py
 Description:   Business logic layer for LLM interactions.
                Orchestrates task-specific prompt construction, context
                aggregation, and strict schema validation of LLM outputs.
-               
-               Architecture Note:
-               This layer receives raw strings from the LLM Router and 
-               processes them via the SchemaValidator. It enforces the 
-               backend's 'Death to JSON' flat-text data extraction policy 
-               before yielding parsed Python dictionaries back to the 
-               transport layer (app.py).
+
+Architecture Note:
+This layer receives raw strings from the LLM Router and
+processes them via the SchemaValidator. It enforces the
+backend's 'Death to JSON' flat-text data extraction policy
+before yielding parsed Python dictionaries back to the
+transport layer (app.py).
 =============================================================================
 """
+
+# pylint: disable=duplicate-code
+# Justification: shares the chat-history formatting + prompt-build
+# pattern with scripts/benchmark_task.py. Both files build a
+# SkillsLibrary chat/sigmund prompt by joining history messages with
+# role labels — the benchmark harness intentionally mirrors the
+# production code path so its results reflect what the analyser
+# actually sends. Refactoring would couple the benchmark to internal
+# helpers and reduce its value as an independent reference.
+
+from __future__ import annotations
 
 import re
 import json
@@ -36,6 +46,7 @@ async def analyse_product(
     text_front:     str,
     text_nutrition: str,
 ) -> Optional[dict]:
+    """Analyse OCR-extracted product label/nutrition text via flat-text LLM extraction."""
     if not text_front and not text_nutrition:
         return None
 
@@ -50,17 +61,17 @@ async def analyse_product(
             optimize      = _cfg["optimize"],
             timeout       = _cfg["timeout"],
         )
-        
+
         raw_text = str(response.get("result", ""))
-        
+
         expected_keys = [
             "valid_input", "item", "verdict", "summary", "warnings", "ingredients", "flagged", "reasoning"
         ]
-        
+
         blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
         if not blocks:
             return None
-            
+
         # The LLM Semantic Validation Gate
         if str(blocks[0].get("valid_input", "")).lower() == "false":
             logger.warning("LLM flagged product input data as invalid/irrelevant.")
@@ -71,11 +82,12 @@ async def analyse_product(
         return blocks[0]
 
     except Exception as e:
-        logger.error(f" analyse_product failed: {e}")
+        logger.error("analyse_product failed: %s for gtin %s", e, gtin)
         return None
 
 
 async def analyse_meal(image: str, profile: str) -> Optional[dict]:
+    """Analyse a base64-encoded meal photo against a dietary profile via the LLM."""
     if not image:
         return None
 
@@ -89,17 +101,17 @@ async def analyse_meal(image: str, profile: str) -> Optional[dict]:
             optimize      = _cfg["optimize"],
             timeout       = _cfg["timeout"],
         )
-        
+
         raw_text = str(response.get("result", ""))
-        
+
         expected_keys = [
             "valid_input", "dish", "verdict", "summary", "warnings", "ingredients", "flagged", "reasoning"
         ]
-        
+
         blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
         if not blocks:
             return None
-            
+
         # The LLM Semantic Validation Gate
         if str(blocks[0].get("valid_input", "")).lower() == "false":
             logger.warning("LLM flagged meal image data as invalid/irrelevant.")
@@ -109,7 +121,7 @@ async def analyse_meal(image: str, profile: str) -> Optional[dict]:
         return blocks[0]
 
     except Exception as e:
-        logger.error(f" analyse_meal failed: {e}")
+        logger.error("analyse_meal failed: %s", e)
         return None
 
 
@@ -123,14 +135,14 @@ async def analyse_menu(text: str) -> Optional[dict]:
     try:
         response = await router.analyse(
             payload       = {"menu_text": text},
-            profile       = "", 
+            profile       = "",
             model_strings = _cfg["models"],
             optimize      = _cfg["optimize"],
             timeout       = _cfg["timeout"],
         )
-        
+
         raw_text = response.get("result", "")
-        
+
         if isinstance(raw_text, dict):
             raw_text = json.dumps(raw_text)
         else:
@@ -138,15 +150,15 @@ async def analyse_menu(text: str) -> Optional[dict]:
 
         expected_keys = ["valid_input", "dish", "listed", "suspected"]
         extracted_blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
-        
+
         if not extracted_blocks:
             return None
-            
+
         # The LLM Semantic Validation Gate
         if str(extracted_blocks[0].get("valid_input", "")).lower() == "false":
             logger.warning("LLM flagged menu input data as invalid/irrelevant.")
             return None
-        
+
         dishes = []
         for block in extracted_blocks:
             dish_data = {
@@ -163,7 +175,7 @@ async def analyse_menu(text: str) -> Optional[dict]:
         return {"type": "menu", "items": dishes}
 
     except Exception as e:
-        logger.error(f" analyse_menu failed: {e}")
+        logger.error("analyse_menu failed: %s", e)
         return None
 
 
@@ -173,40 +185,41 @@ async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
         return None
 
     prompt = SkillsLibrary.enrich_nutrition_prompt(ocr_text)
-    
-    _cfg = llm_config.task_config("enrich_nutrition") 
+
+    _cfg = llm_config.task_config("enrich_nutrition")
 
     try:
         response = await router.analyse(
             payload       = {"prompt": prompt},
-            profile       = "", 
+            profile       = "",
             model_strings = _cfg["models"],
             optimize      = _cfg["optimize"],
             timeout       = _cfg["timeout"],
         )
-        
+
         raw_text = str(response.get("result", "")).strip()
-        
+
         expected_keys = [
-            "valid_input", "energy_kj", "calories_kcal", "protein_g", "fat_total_g", 
+            "valid_input", "energy_kj", "calories_kcal", "protein_g", "fat_total_g",
             "fat_saturated_g", "carbohydrates_g", "sugars_g", "fibre_g", "sodium_mg"
         ]
-        
+
         blocks = SchemaValidator.extract_blocks(raw_text, expected_keys)
         if not blocks:
             return None
-            
+
         # The LLM Semantic Validation Gate
         if str(blocks[0].get("valid_input", "")).lower() == "false":
             logger.warning("LLM flagged nutrition OCR data as invalid/irrelevant.")
             return None
-            
+
         parsed = blocks[0]
 
         final_nutrition = {}
         for key in expected_keys:
-            if key == "valid_input": continue
-            
+            if key == "valid_input":
+                continue
+
             val = parsed.get(key, "")
             if val:
                 try:
@@ -219,7 +232,7 @@ async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
         return final_nutrition
 
     except Exception as e:
-        logger.error(f" enrich_nutrition failed: {e}", exc_info=True)
+        logger.error("enrich_nutrition failed: %s for gtin %s", e, gtin, exc_info=True)
         return None
 
 
@@ -227,7 +240,12 @@ async def enrich_nutrition(gtin: str, ocr_text: str) -> Optional[dict]:
 # Chat Pipeline
 # ---------------------------------------------------------------------------
 
-async def chat_assistant(system_context: dict, history: list, message: str, trigzi_nickname: str = "Trigzi") -> tuple[Optional[str], Optional[str]]:
+async def chat_assistant(
+    system_context:  dict,
+    history:         list,
+    message:         str,
+    trigzi_nickname: str = "Trigzi",
+) -> tuple[Optional[str], Optional[str]]:
     """Task 1: Generate the clinical response text and intercept UI actions. Returns (text, action)"""
     if not message:
         return None, None
@@ -272,21 +290,21 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
     try:
         response = await router.analyse(
             payload       = {"prompt": prompt},
-            profile       = "", 
-            model_strings = _cfg["models"], 
+            profile       = "",
+            model_strings = _cfg["models"],
             optimize      = _cfg.get("optimize", "failover"),
             timeout       = _cfg.get("timeout", 12),
         )
-        
+
         raw_text = str(response.get("result", "")).strip()
-        
+
         if raw_text.lower().startswith("response:"):
             raw_text = raw_text[9:]
         raw_text = raw_text.strip(" \n-")
 
         action_command = None
         action_match = re.search(r'\[ACTION:\s*([^\]]+)\]', raw_text)
-        
+
         if action_match:
             action_command = action_match.group(1).strip()
             if action_command.upper() == "NONE":
@@ -296,7 +314,7 @@ async def chat_assistant(system_context: dict, history: list, message: str, trig
         return raw_text, action_command
 
     except Exception as e:
-        logger.error(f" chat_assistant failed: {e}", exc_info=True)
+        logger.error("chat_assistant failed: %s", e, exc_info=True)
         return None, None
 
 
@@ -312,20 +330,20 @@ async def chat_emoji(text: str) -> str:
         response = await router.analyse(
             payload       = {"prompt": prompt},
             profile       = "",
-            model_strings = _cfg["models"], 
-            optimize      = _cfg.get("optimize", "speed"), 
+            model_strings = _cfg["models"],
+            optimize      = _cfg.get("optimize", "speed"),
             timeout       = _cfg.get("timeout", 3.0),
         )
 
         emoji_str = str(response.get("result", "")).strip()
-        
+
         if not emoji_str or "none" in emoji_str.lower():
             return ""
-            
-        return emoji_str[0] 
+
+        return emoji_str[0]
 
     except Exception as e:
-        logger.error(f" chat_emoji failed: {e}")
+        logger.error("chat_emoji failed: %s", e)
         return ""
 
 
@@ -340,12 +358,12 @@ async def onboarding_assistant(message: str, fallback_name: str, trigzi_nickname
     try:
         response = await router.analyse(
             payload       = {"prompt": prompt},
-            profile       = "", 
-            model_strings = _cfg["models"], 
+            profile       = "",
+            model_strings = _cfg["models"],
             optimize      = _cfg.get("optimize", "failover"),
             timeout       = _cfg.get("timeout", 12),
         )
-        
+
         raw_text = str(response.get("result", "")).strip()
         if raw_text.lower().startswith("response:"):
             raw_text = raw_text[9:]
@@ -356,7 +374,8 @@ async def onboarding_assistant(message: str, fallback_name: str, trigzi_nickname
 
         for line in raw_text.split('\n'):
             line = line.strip()
-            if not line or line == "---": continue
+            if not line or line == "---":
+                continue
 
             if line.startswith("Message:"):
                 text_content = line[8:].strip()
@@ -377,7 +396,7 @@ async def onboarding_assistant(message: str, fallback_name: str, trigzi_nickname
         return events, text_content
 
     except Exception as e:
-        logger.error(f" onboarding_assistant failed: {e}")
+        logger.error("onboarding_assistant failed: %s", e)
         return [{"event": "error", "data": {"message": "Analysis failed."}}], ""
 
 
@@ -410,26 +429,26 @@ async def sigmund_assistant(system_context: dict, history: list, message: str) -
         message=message
     )
 
-    _cfg = llm_config.task_config("chat_sigmund") 
+    _cfg = llm_config.task_config("chat_sigmund")
 
     try:
         response = await router.analyse(
             payload       = {"prompt": prompt},
-            profile       = "", 
-            model_strings = _cfg["models"], 
-            optimize      = "accuracy", 
+            profile       = "",
+            model_strings = _cfg["models"],
+            optimize      = "accuracy",
             timeout       = _cfg.get("timeout", 15),
         )
-        
+
         raw_text = str(response.get("result", "")).strip()
-        
+
         if raw_text.lower().startswith("response:"):
             raw_text = raw_text[9:]
         raw_text = raw_text.strip(" \n-")
 
         action_command = None
         action_match = re.search(r'\[ACTION:\s*([^\]]+)\]', raw_text)
-        
+
         if action_match:
             action_command = action_match.group(1).strip()
             raw_text = re.sub(r'\[ACTION:\s*[^\]]+\]', '', raw_text).strip()
@@ -437,5 +456,5 @@ async def sigmund_assistant(system_context: dict, history: list, message: str) -
         return raw_text, action_command
 
     except Exception as e:
-        logger.error(f" sigmund_assistant failed: {e}")
+        logger.error("sigmund_assistant failed: %s", e)
         return None, None

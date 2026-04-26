@@ -1,11 +1,42 @@
-#!/usr/bin/env python3
+"""
+=============================================================================
+Module:        Test — OFF Product Lookup
+Location:      tests/test_off_lookup.py
+Description:   Unit tests for utils/off_lookup.py — the GTIN-keyed
+               read/write API over the local Open Food Facts mirror.
+               Every DB call is mocked via deep aiomysql pool/conn/
+               cursor mock hierarchy; no live database required.
+
+Architecture Note:
+The OFFLookup interface needs careful test coverage because it sits
+between the analyser (cache hit fast-path) and the enricher (writes
+new records, updates enrichment_id). A subtle bug in upsert
+semantics (e.g. accidentally clearing enrichment_id on a partial
+write) is invisible until production data drifts.
+
+The mock construction in _mock_db is intentionally explicit about
+the sync-vs-async layers:
+  - Pool.acquire()                returns a sync context manager
+  - The CM yields a connection    via async __aenter__
+  - conn.cursor()                 returns a sync context manager
+  - The CM yields a cursor        via async __aenter__
+  - cursor.execute / fetchone     are async
+Mismatching any of these layers produces "AsyncMock not awaited" or
+"AttributeError on __aenter__" errors that obscure the actual test
+intent — hence the dedicated _mock_db helper.
+=============================================================================
+"""
+
+# Test files use different conventions to library code; pylint relaxations:
+#   missing-class-docstring  — test class names ARE the docstring
+#   missing-function-docstring — test method names ARE the docstring
+#   import-outside-toplevel — methods import lazily to scope mock.patch / defer slow loads
+#   redefined-outer-name   — pytest fixture pattern: fixture & param share name
+#   unused-argument        — Mock side_effect callbacks take *args, **kwargs they don't read
+# pylint: disable=missing-class-docstring,missing-function-docstring,import-outside-toplevel,redefined-outer-name,unused-argument
+
 from __future__ import annotations
-#
-#  tests/test_off_lookup.py
-#
-#  Unit tests for utils/off_lookup.py
-#  All DB calls are mocked -- no live database required.
-#
+
 import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch

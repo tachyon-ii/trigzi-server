@@ -34,6 +34,14 @@ Schema note: llm_providers.json is shaped as
 …NOT with task entries at the top level. Tests read from cfg["routing"][task].
 """
 
+# Test files use different conventions to library code; pylint relaxations:
+#   missing-class-docstring  — test class names ARE the docstring
+#   missing-function-docstring — test method names ARE the docstring
+#   import-outside-toplevel — methods import lazily to scope mock.patch / defer slow loads
+#   redefined-outer-name   — pytest fixture pattern: fixture & param share name
+#   unused-argument        — Mock side_effect callbacks take *args, **kwargs they don't read
+# pylint: disable=missing-class-docstring,missing-function-docstring,import-outside-toplevel,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import json

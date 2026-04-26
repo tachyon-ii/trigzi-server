@@ -1,16 +1,33 @@
 #!/usr/bin/env python3
 """
-ingredient_parser.py — extract a flat ordered list of ingredient tokens from a raw string.
+=============================================================================
+Module:        Ingredient Parser
+Location:      utils/ingredient_parser.py
+Description:   Extracts a flat, deduplicated, order-preserving list of
+               canonical ingredient tokens from a raw OCR/label string.
+               Handles HTML stripping, OCR merge/split correction, leading
+               qualifier removal, dosage prefix stripping, additive/CI
+               code preservation, and vocabulary-based filtering of noise.
 
-parse_ingredients(raw) -> List[str]
+Architecture Note:
+The pipeline is staged: HTML strip → preprocess (separator/case
+normalisation) → numeric-code extraction (E-numbers, CI colour codes
+emitted ahead of words) → tokenisation → per-token cleaning + drop
+filters → vocabulary check + unknown bucket. The vocabulary is loaded
+once at import from data/clean_words.txt — a frequency-curated word
+list — so per-call cost is bounded by the input length.
 
-Returns a deduplicated, order-preserving flat list of canonical ingredient tokens.
+Public API:
+    parse_ingredients(raw)        -> List[str]
+    parse_ingredients_debug(raw)  -> Tuple[List[str], List[str]]
+                                     (knowns, unknowns) for offline review
+=============================================================================
 """
 
 import re
-from typing import List, Set, Tuple, Optional
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import List, Optional, Set, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -18,6 +35,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _load_vocab() -> Set[str]:
+    """Load the curated ingredient vocabulary from data/clean_words.txt."""
     p = Path(__file__).parent.parent / "data" / "clean_words.txt"
     if p.exists():
         return set(p.read_text().splitlines())
@@ -95,19 +113,37 @@ def _fix_token_ocr(token: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 class _MLStripper(HTMLParser):
+    """Minimal HTMLParser subclass that captures bare text content.
+
+    Used to extract human-readable ingredient text from the
+    HTML-fragment fields some upstream feeds emit. The stdlib's
+    HTMLParser exposes ``error`` as an abstract slot; we suppress it
+    rather than raise, since malformed HTML in ingredient fields is
+    common upstream noise we want to forgive, not fail on.
+    """
+
     def __init__(self):
         super().__init__()
         self.reset()
         self.fed = []
 
-    def handle_data(self, d):
-        self.fed.append(d)
+    def handle_data(self, data):
+        """Accumulate every text fragment encountered during parsing."""
+        self.fed.append(data)
+
+    def error(self, message):
+        """Swallow malformed-HTML errors silently — best-effort extraction."""
+        # Intentionally no-op. HTMLParser.error is called for malformed
+        # markup; we'd rather collect whatever text we can than crash on
+        # broken upstream feeds.
 
     def get_data(self):
+        """Return the concatenated text content captured during parsing."""
         return ' '.join(self.fed)
 
 
 def _strip_html(raw: str) -> str:
+    """Strip HTML tags from a fragment, returning bare text content."""
     s = _MLStripper()
     s.feed(raw)
     return s.get_data()
@@ -191,6 +227,11 @@ _PUNCT_ONLY_RE = re.compile(r'^[^a-z0-9\-]+$')
 # ---------------------------------------------------------------------------
 
 def _preprocess(raw: str) -> str:
+    """Apply pre-tokenisation cleanup: HTML strip, entity decode, normalise separators.
+
+    Aborts on raw containing block-level HTML tags (treated as non-content);
+    otherwise produces a flattened single-line string ready for tokenisation.
+    """
     if re.search(r'<(div|p)\b', raw, re.IGNORECASE):
         return ''
 
@@ -273,7 +314,16 @@ def _preprocess(raw: str) -> str:
 # Token cleaning
 # ---------------------------------------------------------------------------
 
-def _clean_token(tok: str) -> str:
+def _clean_token(tok: str) -> str:  # pylint: disable=too-many-return-statements,too-many-branches
+    """Apply the per-token cleanup + reject filter chain.
+
+    Returns either a cleaned canonical token or '' for tokens that
+    should be dropped from the output. The 17 returns and 21 branches
+    each correspond to a distinct upstream pattern (Unicode bullets,
+    leading dosage prefixes, internal product/batch codes, URL
+    fragments, etc.) — collapsing them into a table-driven structure
+    would obscure which upstream artefact each rule is fighting.
+    """
     if not tok:
         return ''
 
@@ -315,10 +365,16 @@ def _clean_token(tok: str) -> str:
 
     tok = tok.strip().lower()
 
-    if not tok:                             return ''
-    if len(tok) < 2:                        return ''
+    if not tok:
+        return ''
+    if len(tok) < 2:
+        return ''
     # Drop 2-char tokens unless vitamin code (b6, d3), known abbrev, or known vocab word
-    if len(tok) == 2 and not re.match(r'^[a-z]\d+$', tok) and tok not in _VOCAB and tok not in _SHORT_ABBREVS: return ''
+    if (len(tok) == 2
+            and not re.match(r'^[a-z]\d+$', tok)
+            and tok not in _VOCAB
+            and tok not in _SHORT_ABBREVS):
+        return ''
     # Drop short tokens (3-5 chars) not in vocab, not additive/CI codes, not vitamin codes, not abbrevs
     if (len(tok) <= 5
             and tok not in _VOCAB
@@ -326,20 +382,28 @@ def _clean_token(tok: str) -> str:
             and not re.match(r'^[a-z]\d+$', tok)
             and tok not in _SHORT_ABBREVS):
         return ''
-    if _PUNCT_ONLY_RE.match(tok):           return ''
-    if tok in _STOPWORD_TOKENS:             return ''
-    if _BRAND_JUNK_RE.match(tok):           return ''
-    if _DISCLAIMER_RE.match(tok):           return ''
-    if len(tok) > 80:                       return ''
+    if _PUNCT_ONLY_RE.match(tok):
+        return ''
+    if tok in _STOPWORD_TOKENS:
+        return ''
+    if _BRAND_JUNK_RE.match(tok):
+        return ''
+    if _DISCLAIMER_RE.match(tok):
+        return ''
+    if len(tok) > 80:
+        return ''
 
     # Drop internal product/batch codes: g853331, d166390, z282167, c199905
-    if re.fullmatch(r'[a-z]\d{5,}', tok):              return ''
+    if re.fullmatch(r'[a-z]\d{5,}', tok):
+        return ''
 
     # Discard URLs
-    if re.search(r'www\.|\.com|\.au|\.nz', tok):  return ''
+    if re.search(r'www\.|\.com|\.au|\.nz', tok):
+        return ''
 
     # Discard leading-hyphen chemical fragments: "-monophosphate", "-butyl"
-    if tok.startswith('-'):                 return ''
+    if tok.startswith('-'):
+        return ''
 
     # Drop dosage fragments: "0g", "0il", "0.5mg", "100mgzinc"
     # Exempt additive codes (3-4 digits) and CI colour numbers (5-6 digits)
@@ -409,6 +473,14 @@ def _extract_codes_from_string(raw: str) -> Tuple[List[str], List[str], str]:
 
 
 def _parse_with_unknowns(raw: str) -> Tuple[List[str], List[str]]:
+    """Core pipeline: parse raw → (knowns, unknowns) tuple.
+
+    knowns are tokens that pass vocabulary/code checks; unknowns are
+    tokens that survive cleaning but don't match any known category.
+    The unknowns bucket feeds the offline review process — words
+    showing up frequently there are candidates for vocabulary
+    inclusion or new cleaning rules.
+    """
     if not raw:
         return [], []
 
@@ -430,11 +502,16 @@ def _parse_with_unknowns(raw: str) -> Tuple[List[str], List[str]]:
             result.append(tok)
 
     def _is_known(tok: str) -> bool:
-        if tok in _VOCAB:                           return True
-        if tok in _SHORT_ABBREVS:                   return True
-        if re.fullmatch(r'\d{3,4}[a-f]?', tok):    return True  # additive code
-        if re.fullmatch(r'\d{5,6}', tok):           return True  # CI colour index
-        if re.match(r'^[a-z]\d+$', tok):            return True  # vitamin code b6, d3
+        if tok in _VOCAB:
+            return True
+        if tok in _SHORT_ABBREVS:
+            return True
+        if re.fullmatch(r'\d{3,4}[a-f]?', tok):    # additive code
+            return True
+        if re.fullmatch(r'\d{5,6}', tok):          # CI colour index
+            return True
+        if re.match(r'^[a-z]\d+$', tok):           # vitamin code b6, d3
+            return True
         return False
 
     # Emit all extracted codes first

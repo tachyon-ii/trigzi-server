@@ -1,4 +1,19 @@
-# core/llm/providers/gemini.py
+"""
+=============================================================================
+Module:        Gemini Provider
+Location:      core/llm/providers/gemini.py
+Description:   Concrete BaseProvider implementation for Google Gemini.
+               Wires the request/response filters, probe mixin, and the
+               generativelanguage.googleapis.com generateContent endpoint
+               together with the API key as a URL query parameter.
+
+Architecture Note:
+Unlike Claude and OpenAI, Gemini bakes the model name into the URL
+path (rather than the request body), so build_url() resolves the
+model tag and embeds it before the :generateContent verb.
+=============================================================================
+"""
+
 import os
 from .base import BaseProvider
 from ..filters import GeminiRequestFilter, GeminiResponseFilter
@@ -7,6 +22,7 @@ from ..probe import GeminiProbeMixin
 
 
 class GeminiProvider(GeminiProbeMixin, BaseProvider):
+    """Google Gemini provider client. See :class:`BaseProvider` for the contract."""
 
     @property
     def provider_name(self) -> str:

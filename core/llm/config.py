@@ -1,29 +1,35 @@
-# core/llm/config.py
 """
-LLM provider configuration manager.
+=============================================================================
+Module:        LLM Provider Config
+Location:      core/llm/config.py
+Description:   Loads llm_providers.json once at server startup and vends
+               model configuration to the router and providers. Replaces
+               all hardcoded model strings — adding or updating a model
+               requires only a JSON edit.
 
-Loads llm_providers.json once at server startup and vends model
-configuration to the router and providers. Replaces all hardcoded model
-strings — adding or updating a model requires only a JSON edit.
+               Thread-safe singleton: the config object is initialised
+               exactly once using a threading.Lock, guaranteeing zero race
+               conditions during concurrent request handling and zero disk
+               I/O latency after startup.
 
-Thread-safe singleton: the config object is initialised exactly once
-using a threading.Lock, guaranteeing zero race conditions during
-concurrent request handling and zero disk I/O latency after startup.
-
-The module-level `config` instance is the intended import target:
+Architecture Note:
+The module-level `config` instance is the intended import target.
+Do not instantiate LLMProviderConfig directly:
 
     from core.llm.config import config
 
     primary = config.primary_model("gemini")      # "gemini-2.5-flash"
     chain   = config.hierarchy("gemini")          # ["gemini-2.5-flash", ...]
-    cost    = config.estimate_cost(              
+    cost    = config.estimate_cost(
                   "gemini-2.5-flash",
                   input_tokens=800,
                   output_tokens=200
               )
 
-JSON location: core/llm/llm_providers.json
-(same directory as this file — consistent with Swift's Resources/ pattern)
+JSON location: core/llm/llm_providers.json — same directory as this
+file, consistent with Swift's Resources/ pattern so deployment can move
+the JSON without touching code paths.
+=============================================================================
 """
 
 import json
@@ -38,6 +44,12 @@ class LLMProviderConfig:
 
     Do not instantiate directly — use the module-level `config` instance.
     """
+
+    # Class-level type declaration. The actual value is assigned in
+    # _load_config() via the __new__ singleton pattern; this annotation
+    # exists so static analysis (pylint) understands that _config is a
+    # legitimate instance attribute rather than one defined "outside __init__".
+    _config: dict
 
     _instance = None
     _lock     = threading.Lock()
@@ -261,20 +273,20 @@ class LLMProviderConfig:
     # ------------------------------------------------------------------ #
     # Task routing config                                                  #
     # ------------------------------------------------------------------ #
- 
+
     _ROUTING_DEFAULTS = {
         "models":   ["gemini", "claude", "openai"],
         "optimize": "failover",
         "timeout":  60.0,
     }
- 
+
     def task_config(self, task: str) -> dict:
         """
         Return routing config for a named task.
- 
+
         Reads from the 'routing' section of llm_providers.json.
         Falls back to sensible defaults if the task or section is absent.
- 
+
         Usage:
             cfg = config.task_config("enrich")
             response = await router.analyse(

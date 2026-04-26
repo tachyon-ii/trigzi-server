@@ -127,4 +127,3 @@ class LLMError(Exception):
         """The requested provider name is not in the registry."""
         return cls(f"Unknown provider: {provider}",
                    provider=provider, is_failoverable=False)
-

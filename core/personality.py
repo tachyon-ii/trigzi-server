@@ -1,16 +1,15 @@
-#!/usr/bin/env python3
-from __future__ import annotations
+# pylint: disable=line-too-long
 """
 ==============================================================================
 Module:        Persona Matrix Engine
 Location:      /var/www/trigzi/core/personality.py
-Description:   The way you ask an LLM to behave completely dictates how it 
+Description:   The way you ask an LLM to behave completely dictates how it
                responds—short/long, happy/sad, clinical/sassy.
-               
-               This module centralizes Trigzi's "Voice". It dynamically 
+
+               This module centralizes Trigzi's "Voice". It dynamically
                constructs the system instruction by evaluating the user's
                state from the system context.
-               
+
                Current Multipliers:
                1. Attitude Level (0, 1, 2) -> The Vibe (Clinical to Sassy)
                2. Experience Mode (0, 1, 2) -> The Audience (Kids to Advanced)
@@ -19,6 +18,8 @@ Description:   The way you ask an LLM to behave completely dictates how it
                our personas without polluting the network orchestration layer.
 ==============================================================================
 """
+
+from __future__ import annotations
 
 def get_persona_instruction(system_context: dict) -> str:
     """
@@ -40,5 +41,5 @@ def get_persona_instruction(system_context: dict) -> str:
     if experience_mode == 0:
         kids_modifier = "You are interacting with a child between 8 and 14 years old. You must use age-appropriate, highly encouraging language, avoid complex medical jargon, and ensure all advice is gentle and safe. "
         return kids_modifier + base_persona
-        
+
     return base_persona

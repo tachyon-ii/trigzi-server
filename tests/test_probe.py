@@ -1,13 +1,35 @@
-#!/usr/bin/env python3
+"""
+=============================================================================
+Module:        Test — Provider Probe / Health Check
+Location:      tests/test_probe.py
+Description:   Unit tests for core/llm/probe.py — the provider health
+               check layer that periodically pings each LLM provider
+               to track availability, default-model presence, and
+               response latency. All network calls are mocked; no
+               real API keys required.
 
-# test/test_probe.py
+Architecture Note:
+The probe layer is what feeds the router's "is this provider up?"
+signal. If it lies (false-positive on a dead provider, or
+false-negative on a healthy one), the router either piles requests
+onto a failing API or unnecessarily skips a working one. These
+tests cover the four provider implementations (Gemini, Claude,
+OpenAI, plus the scheduler that orchestrates them) against
+controlled mock responses representing each upstream's success
+and failure modes.
+=============================================================================
 """
-Unit tests for the provider probe / health-check layer.
-All network calls are mocked — no real API keys required.
-"""
+
+# Test files use different conventions to library code; pylint relaxations:
+#   missing-class-docstring  — test class names ARE the docstring
+#   missing-function-docstring — test method names ARE the docstring
+#   import-outside-toplevel — methods import lazily to scope mock.patch / defer slow loads
+#   redefined-outer-name   — pytest fixture pattern: fixture & param share name
+#   unused-argument        — Mock side_effect callbacks take *args, **kwargs they don't read
+# pylint: disable=missing-class-docstring,missing-function-docstring,import-outside-toplevel,redefined-outer-name,unused-argument
+
 import asyncio
 import unittest
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.llm.probe import (

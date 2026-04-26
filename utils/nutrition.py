@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-utils/nutrition.py — normalise nutrition data from any source into NutriObject.
+=============================================================================
+Module:        Nutrition Normaliser
+Location:      utils/nutrition.py
+Description:   Normalises nutrition data from any source (Woolworths SAP
+               JSON, Coles structured breakdown, Open Food Facts dump)
+               into the unified NutriObject schema. Handles the
+               source-specific quirks (kJ-vs-kcal, per-100g-vs-per-serve,
+               unit suffixes like "21.8 g" / "<1 g") in one place.
 
-NutriObject:
+NutriObject schema:
 {
     "energy_kj":       float | null,
     "calories_kcal":   float | null,   # derived: round(kj / 4.184, 1)
@@ -15,14 +22,23 @@ NutriObject:
     "sodium_mg":       float | null,
 }
 
-null  = not declared on panel
-0.0   = declared zero
-{}    = no nutrition panel at all (non-food product)
+Three null/zero conventions matter:
+  null  = not declared on panel
+  0.0   = declared zero (or "<1" trace coerced down)
+  {}    = no nutrition panel at all (non-food product)
+
+Architecture Note:
+Each provider has its own parse_* entry point that returns the same
+4-tuple: (macros_100g, macros_serve, serving_size_g, servings_per_pack).
+The internal _build_nutri / _extract_float / _kcal helpers are shared
+across providers so source-specific code stays focused on the upstream
+shape, not the canonical output.
+=============================================================================
 """
 
 import json
 import re
-from typing import Optional, Tuple, Union, Dict
+from typing import Optional, Tuple, Union
 
 
 # ---------------------------------------------------------------------------
@@ -50,16 +66,18 @@ def _extract_float(raw) -> Optional[float]:
 
 
 def _kcal(kj: Optional[float]) -> Optional[float]:
+    """Convert kilojoules to kilocalories using the standard 4.184 ratio."""
     if kj is None:
         return None
     return round(kj / 4.184, 1)
 
 
 def _empty_nutri() -> dict:
+    """Return the empty NutriObject ({}) sentinel for non-food / no-panel records."""
     return {}
 
 
-def _build_nutri(
+def _build_nutri(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     energy_kj=None,
     protein_g=None,
     fat_total_g=None,
@@ -69,17 +87,32 @@ def _build_nutri(
     fibre_g=None,
     sodium_mg=None,
 ) -> dict:
-    """Build a NutriObject, omitting keys that are null."""
+    """Build a NutriObject, omitting keys that are null.
+
+    The argument count (8) exceeds pylint's default of 5, but the
+    function is genuinely one-argument-per-nutrient — splitting into
+    sub-builders or a dict-input pattern would lose the keyword-arg
+    self-documenting quality at every call site. The shape mirrors the
+    NutriObject schema described in the module docstring.
+    """
     obj = {}
-    if energy_kj       is not None: obj["energy_kj"]        = energy_kj
-    if energy_kj       is not None: obj["calories_kcal"]    = _kcal(energy_kj)
-    if protein_g       is not None: obj["protein_g"]        = protein_g
-    if fat_total_g     is not None: obj["fat_total_g"]      = fat_total_g
-    if fat_saturated_g is not None: obj["fat_saturated_g"]  = fat_saturated_g
-    if carbohydrates_g is not None: obj["carbohydrates_g"]  = carbohydrates_g
-    if sugars_g        is not None: obj["sugars_g"]         = sugars_g
-    if fibre_g         is not None: obj["fibre_g"]          = fibre_g
-    if sodium_mg       is not None: obj["sodium_mg"]        = sodium_mg
+    if energy_kj is not None:
+        obj["energy_kj"]       = energy_kj
+        obj["calories_kcal"]   = _kcal(energy_kj)
+    if protein_g is not None:
+        obj["protein_g"]       = protein_g
+    if fat_total_g is not None:
+        obj["fat_total_g"]     = fat_total_g
+    if fat_saturated_g is not None:
+        obj["fat_saturated_g"] = fat_saturated_g
+    if carbohydrates_g is not None:
+        obj["carbohydrates_g"] = carbohydrates_g
+    if sugars_g is not None:
+        obj["sugars_g"]        = sugars_g
+    if fibre_g is not None:
+        obj["fibre_g"]         = fibre_g
+    if sodium_mg is not None:
+        obj["sodium_mg"]       = sodium_mg
     return obj
 
 
@@ -161,7 +194,15 @@ def parse_woolworths(raw_nip: Optional[str]) -> Tuple[dict, dict, Optional[float
 #  "servingSize": "115g", "servingsPerPackage": "23.00"}
 # ---------------------------------------------------------------------------
 
-def _map_coles_nutrient(name: str) -> Optional[str]:
+def _map_coles_nutrient(name: str) -> Optional[str]:  # pylint: disable=too-many-return-statements
+    """Map a Coles nutrient label to its canonical NutriObject key.
+
+    Returns one canonical key per Coles-side label match. The 9 returns
+    mirror the 9 NutriObject fields — collapsing them to a dict-lookup
+    would obscure the substring/heuristic logic each branch encodes
+    (e.g. "carbohydrate AND NOT sugar" disambiguating
+    "Carbohydrate excluding sugars" from "Sugars" rows).
+    """
     n = name.lower()
     if "energy" in n and ("kj" in n or n == "energy"):
         return "energy_kj"

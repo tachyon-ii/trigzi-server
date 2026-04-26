@@ -1,31 +1,61 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-#
-#  scripts/tarzan.py
-#
-#  Swings through the codebase and concatenates every .py file
-#  with a clear path header — one file representing the whole system.
-#
-#  Useful for:
-#    - Pasting the full codebase into an LLM context window
-#    - Sending to another AI instance for review
-#    - Point-in-time snapshots of the system
-#
-#  Usage:
-#    ./scripts/tarzan.py                        # stdout
-#    ./scripts/tarzan.py > /tmp/system.py       # file
-#    ./scripts/tarzan.py --root core            # subtree only
-#    ./scripts/tarzan.py --exclude tests        # skip a dir
-#
+"""
+=============================================================================
+Module:        Codebase Concatenator (Tarzan)
+Location:      scripts/tarzan.py
+Description:   Two-mode codebase tool. The default mode swings through the
+               codebase and concatenates every text file with a clear path
+               header — one stream representing the whole system. The
+               --map mode emits a structured project map with banner
+               docstrings, top-level declarations (classes / functions /
+               module constants), and resource-file schema summaries —
+               for quickly bootstrapping a fresh LLM instance into the
+               project's shape without ingesting the full source.
 
-import os
-import sys
+Architecture Note:
+Snapshot mode policy lives in four module-level sets:
+  - INCLUDE_EXTENSIONS — file extensions treated as text-of-interest
+  - EXCLUDE_DIRS — directory names skipped wherever they appear
+  - EXCLUDE_FILES — filenames skipped regardless of directory
+  - DIR_REJECT_EXTENSIONS — per-directory content-type rejection
+    (e.g. html/ keeps web assets but rejects .md/.txt/.py/.bin)
+
+Map mode adds two more:
+  - MAP_INCLUDE_DIRS — directories scanned for resource summaries (JSON
+    schemas, prompt previews). Each entry is a path relative to --root.
+  - MAP_RESOURCE_EXTS — which file types in those dirs get summarised.
+
+The map's structural extraction uses the standard library ast module —
+no third-party deps. Banner docstrings are parsed with one regex pass
+over the module-level string at AST node 0.
+
+Usage:
+    ./scripts/tarzan.py                            # snapshot to stdout
+    ./scripts/tarzan.py > /tmp/system.py           # snapshot to file
+    ./scripts/tarzan.py --root core                # subtree only
+    ./scripts/tarzan.py --exclude tests            # skip a dir
+    ./scripts/tarzan.py --map                      # structured map to stdout
+    ./scripts/tarzan.py --map --output map.md      # structured map to file
+=============================================================================
+"""
+
+from __future__ import annotations
+
 import argparse
+import ast
+import os
+import re
+import subprocess
+import sys
 from datetime import datetime
 
 # Force UTF-8 output regardless of terminal locale
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
+
+# ─── Snapshot-mode policy ────────────────────────────────────────────────────
+
+INCLUDE_EXTENSIONS = {'.py', '.md', '.txt', '.json'}
 
 EXCLUDE_DIRS = {
     'venv', '.venv', 'env', '.env',
@@ -39,26 +69,68 @@ EXCLUDE_FILES = {
     'tarzan.py',   # don't include self
 }
 
+# Per-directory content-type rejections. A file under any of these
+# directories (recursively) whose extension matches the listed set is
+# excluded from the snapshot. Use this to keep a directory's web/data
+# assets while rejecting accidentally-dumped source-code or snapshot
+# artefacts (e.g. ``html/`` should serve .html/.css/.js/.json/.svg but
+# never carry a tarzan-style .txt or .md dump).
+DIR_REJECT_EXTENSIONS = {
+    'html': {'.md', '.txt', '.py', '.bin'},
+    'logs': {'.txt', '.log', '.jsonl'},
+}
+
+# ─── Map-mode policy ─────────────────────────────────────────────────────────
+
+# Directories scanned for resource-schema summaries (relative to --root).
+# Add more here without code changes.
+MAP_INCLUDE_DIRS = [
+    'data',
+    'prompts',
+    'tests/fixtures',
+    'core/llm',           # picks up llm_providers.json
+]
+
+# Which file types in those dirs get a one-line summary in the map.
+MAP_RESOURCE_EXTS = ('.json', '.jsonl', '.txt')
+
+
+# ─── Snapshot mode (existing behaviour) ──────────────────────────────────────
+
 
 def excluded_dir(name: str) -> bool:
+    """True if the directory should be skipped wholesale during the walk."""
     return name in EXCLUDE_DIRS or name.endswith('.egg-info')
 
 
 def excluded_file(name: str) -> bool:
-    if name.endswith(".py"):
-        return name in EXCLUDE_FILES
-    if name.endswith(".md"):
-        return name in EXCLUDE_FILES
-    if name.endswith(".txt"):
-        return name in EXCLUDE_FILES
-    if name.endswith(".json"):
-        return name in EXCLUDE_FILES
-    else:
-        return name
+    """True if the file should be skipped — either wrong extension, or in the blocklist."""
+    _, ext = os.path.splitext(name)
+    if ext not in INCLUDE_EXTENSIONS:
+        return True
+    return name in EXCLUDE_FILES
+
+
+def dir_rejects_file(rel_path: str) -> bool:
+    """True if any ancestor directory of rel_path rejects this file's extension.
+
+    Walks the relative-path ancestors and checks each against
+    DIR_REJECT_EXTENSIONS. Applies recursively — if ``html`` rejects
+    ``.txt``, then ``html/foo.txt`` AND ``html/css/bar.txt`` both fail.
+    """
+    _, ext = os.path.splitext(rel_path)
+    if not ext:
+        return False
+    parts = rel_path.replace('\\', '/').split('/')
+    for ancestor in parts[:-1]:
+        rejects = DIR_REJECT_EXTENSIONS.get(ancestor)
+        if rejects and ext in rejects:
+            return True
+    return False
 
 
 def collect(root: str, extra_exclude: set) -> list[str]:
-    """Return sorted list of .py file paths under root."""
+    """Return sorted list of file paths under root, applying exclude rules."""
     paths = []
     for dirpath, dirnames, filenames in os.walk(root):
         # Prune excluded dirs in-place so os.walk doesn't descend into them
@@ -67,38 +139,399 @@ def collect(root: str, extra_exclude: set) -> list[str]:
             if not excluded_dir(d) and d not in extra_exclude
         )
         for filename in sorted(filenames):
-            if not excluded_file(filename):
-                paths.append(os.path.join(dirpath, filename))
+            if excluded_file(filename):
+                continue
+            full_path = os.path.join(dirpath, filename)
+            rel_path = os.path.relpath(full_path, root)
+            if dir_rejects_file(rel_path):
+                continue
+            paths.append(full_path)
     return paths
 
 
 def header(path: str, root: str) -> str:
+    """Render the per-file boundary marker that precedes each concatenated body.
+
+    Uses HTML-comment markers so the snapshot stays valid Markdown — the
+    boundaries are invisible to a renderer but unambiguous to anyone or
+    anything reading the raw text. No END FILE counterpart: the next
+    BEGIN FILE is the implicit terminator, and the file at the very end
+    of the snapshot is bounded by EOF.
+    """
     rel = os.path.relpath(path, root)
-    bar = '=' * (len(rel) + 8)
-    return f"\n{bar}\n#  {rel}\n{bar}\n"
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'r', encoding='utf-8', errors='replace') as fp:
+            line_count = sum(1 for _ in fp)
+        meta = f"<!--- SIZE: {size:,} bytes · {line_count:,} lines --->"
+    except OSError:
+        meta = "<!--- SIZE: unknown --->"
+
+    return (
+        "\n<!--- BEGIN FILE --->\n"
+        f"<!--- PATH: {rel} --->\n"
+        f"{meta}\n\n"
+    )
 
 
-def run(root: str, extra_exclude: set, output) -> None:
+def run_snapshot(root: str, extra_exclude: set, output) -> None:
+    """Walk root, concatenate every included file's contents to output with markers."""
     paths = collect(root, extra_exclude)
 
     ts  = datetime.now().strftime('%Y-%m-%d %H:%M')
-    output.write(f"# tarzan.py snapshot - {ts}\n")
-    output.write(f"# root: {os.path.abspath(root)}\n")
-    output.write(f"# files: {len(paths)}\n")
+    output.write("<!--- TARZAN SNAPSHOT --->\n")
+    output.write(f"<!--- GENERATED: {ts} --->\n")
+    output.write(f"<!--- ROOT: {os.path.abspath(root)} --->\n")
+    output.write(f"<!--- FILES: {len(paths)} --->\n")
 
     for path in paths:
         output.write(header(path, root))
         try:
-            with open(path, 'r', encoding='utf-8') as f:
-                output.write(f.read())
-        except Exception as e:
-            output.write(f"# ERROR reading file: {e}\n")
+            with open(path, 'r', encoding='utf-8') as fp:
+                output.write(fp.read())
+        except OSError as e:
+            output.write(f"<!--- ERROR reading file: {e} --->\n")
         output.write('\n')
 
 
-if __name__ == '__main__':
+# ─── Map mode: AST-based structural extraction ───────────────────────────────
+
+
+def collect_python_files(root: str, extra_exclude: set) -> list[str]:
+    """Return sorted list of .py file paths under root, applying exclude rules."""
+    paths = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if not excluded_dir(d) and d not in extra_exclude
+        )
+        for filename in sorted(filenames):
+            if not filename.endswith('.py') or filename in EXCLUDE_FILES:
+                continue
+            full_path = os.path.join(dirpath, filename)
+            rel_path = os.path.relpath(full_path, root)
+            if dir_rejects_file(rel_path):
+                continue
+            paths.append(full_path)
+    return paths
+
+
+def extract_docstring_body(docstring: str | None) -> str:
+    """Return the docstring text with the surrounding === ruler lines stripped.
+
+    The banner format is already the human-readable form — humans wrote
+    those alignment columns deliberately. Parsing it into a dict and
+    re-rendering would lose that formatting. Just slice the rulers off
+    and pass the rest through verbatim.
+    """
+    if not docstring:
+        return ''
+    lines = [
+        ln for ln in docstring.splitlines()
+        if not re.match(r'^\s*=+\s*$', ln)
+    ]
+    return '\n'.join(lines).strip()
+
+
+def signature_for(node: ast.AST, source: str) -> str:
+    """Return the verbatim signature line(s) for a class or function from source.
+
+    Uses raw source slicing rather than ast.unparse so the developer's
+    formatting (line breaks, type-hint alignment) is preserved exactly.
+    Strips trailing inline comments (e.g. ``# pylint: disable=...``)
+    that would otherwise pollute the rendered skeleton.
+    """
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return ''
+
+    try:
+        src_lines = source.splitlines()
+        start = node.lineno - 1   # ast lineno is 1-indexed
+        end = (node.body[0].lineno - 1) if node.body else (start + 1)
+
+        sig_lines = src_lines[start:end]
+        if sig_lines:
+            last = sig_lines[-1]
+            # Strip trailing inline comment ('  # ...') first
+            comment_idx = last.find('  #')
+            if comment_idx >= 0:
+                last = last[:comment_idx].rstrip()
+            # Trim everything after the function-def colon (which ends the
+            # signature). This is the LAST colon on the line because type
+            # hints inside parens never have a trailing-paren-then-colon.
+            colon_idx = last.rfind(':')
+            if colon_idx >= 0:
+                sig_lines[-1] = last[:colon_idx + 1]
+            else:
+                sig_lines[-1] = last
+
+        return '\n'.join(sig_lines)
+    except (AttributeError, IndexError):
+        return ''
+
+
+def is_interesting_method(name: str) -> bool:
+    """Filter for which dunder methods to include in the map."""
+    if not name.startswith('_'):
+        return True
+    # Whitelist: __init__ documents construction shape; other dunders are noise
+    if name == '__init__':
+        return True
+    if name.startswith('__') and name.endswith('__'):
+        return False
+    # Single-underscore private methods are part of the class's API surface
+    return True
+
+
+def extract_top_level_constants(tree: ast.Module) -> list[str]:
+    """Return UPPER_CASE module-level assignments rendered as 'NAME = ...'.
+
+    Skips type-annotation-only assignments and non-uppercase names.
+    Truncates RHS for readability.
+    """
+    constants = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            name = target.id
+            if not name.isupper() or len(name) < 2:
+                continue
+            try:
+                rhs = ast.unparse(node.value)
+            except (AttributeError, TypeError):
+                rhs = '...'
+            if len(rhs) > 80:
+                rhs = rhs[:77] + '...'
+            constants.append(f"{name} = {rhs}")
+    return constants
+
+
+def extract_declarations(source: str) -> tuple[list[str], list[str]]:
+    """AST-walk a Python source file, return (signatures, constants).
+
+    Signatures preserve indentation so methods nest under their class
+    visually. Constants are rendered after classes/functions so the
+    structural skeleton reads top-to-bottom like the source itself.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return ([f"# SYNTAX ERROR: {exc}"], [])
+
+    signatures: list[str] = []
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            sig = signature_for(node, source)
+            if sig:
+                signatures.append(sig)
+        elif isinstance(node, ast.ClassDef):
+            sig = signature_for(node, source)
+            if sig:
+                signatures.append(sig)
+            for member in node.body:
+                if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if not is_interesting_method(member.name):
+                    continue
+                method_sig = signature_for(member, source)
+                if method_sig:
+                    signatures.append(method_sig)
+
+    constants = extract_top_level_constants(tree)
+    return signatures, constants
+
+
+# ─── Map mode: resource summaries ────────────────────────────────────────────
+
+
+def summarise_resource(path: str) -> str:
+    """Return a one-line size/lines summary for a resource file.
+
+    Schema sketches were tried earlier but produced output that was
+    structurally complete and semantically empty (e.g. "{key: str, ...}"
+    tells you nothing about which models are configured). A simple
+    "exists, this big, this many lines" is more honest — it tells the
+    reader the file's there and how much it weighs, without pretending
+    to summarise content that genuinely needs to be read in full.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return '_unreadable_'
+
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            line_count = sum(1 for _ in f)
+    except OSError:
+        line_count = 0
+
+    return f"{size:,} bytes · {line_count:,} lines"
+
+
+def collect_resource_files(root: str) -> list[tuple[str, str]]:
+    """Return [(path, summary), ...] for every resource file under MAP_INCLUDE_DIRS."""
+    results: list[tuple[str, str]] = []
+    for sub in MAP_INCLUDE_DIRS:
+        full_dir = os.path.join(root, sub)
+        if not os.path.isdir(full_dir):
+            continue
+        for dirpath, dirnames, filenames in os.walk(full_dir):
+            dirnames[:] = sorted(d for d in dirnames if not excluded_dir(d))
+            for fname in sorted(filenames):
+                if not fname.endswith(MAP_RESOURCE_EXTS):
+                    continue
+                full = os.path.join(dirpath, fname)
+                results.append((full, summarise_resource(full)))
+    return results
+
+
+# ─── Map mode: rendering ─────────────────────────────────────────────────────
+
+
+def _module_group(rel_path: str) -> str:
+    """Pick the grouping key for the project map — the file's containing directory."""
+    return os.path.dirname(rel_path) or '.'
+
+
+def generate_tree_header(root: str) -> str:
+    """Run scripts/tree.py against root and return its stdout, or '' on failure.
+
+    Uses a subprocess rather than importing tree.py so the two tools stay
+    loosely coupled — tree.py changes (PRUNE_CONTENTS_DIRS, EXCLUDE_DIRS)
+    take effect immediately without tarzan needing edits.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    tree_path = os.path.join(here, 'tree.py')
+    if not os.path.isfile(tree_path):
+        return ''
+
+    try:
+        result = subprocess.run(
+            [sys.executable, tree_path, root],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return result.stdout
+    except (subprocess.SubprocessError, OSError):
+        return ''
+
+
+def render_file_section(path: str) -> list[str]:
+    """Render one file's map section: docstring body + declarations skeleton."""
+    fname = os.path.basename(path)
+
+    try:
+        with open(path, 'r', encoding='utf-8') as fp:
+            source = fp.read()
+    except OSError as exc:
+        return [f"### {fname}", f"_could not read: {exc}_", ""]
+
+    try:
+        tree = ast.parse(source)
+        docstring = ast.get_docstring(tree)
+    except SyntaxError:
+        docstring = None
+
+    docstring_body = extract_docstring_body(docstring)
+    signatures, constants = extract_declarations(source)
+
+    out: list[str] = [f"### {fname}", '']
+
+    if docstring_body:
+        # Wrap in a code block so alignment / indentation survive any
+        # markdown renderer that might otherwise reflow whitespace.
+        out.append('```')
+        out.append(docstring_body)
+        out.append('```')
+        out.append('')
+
+    if signatures or constants:
+        out.append("```python")
+        for sig in signatures:
+            out.append(sig)
+        if signatures and constants:
+            out.append('')
+        for const in constants:
+            out.append(const)
+        out.append("```")
+        out.append('')
+
+    return out
+
+
+def render_map(root: str, extra_exclude: set) -> str:
+    """Build the structured Markdown map covering Python files + resource summaries."""
+    paths = collect_python_files(root, extra_exclude)
+    resources = collect_resource_files(root)
+
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M')
+    project = os.path.basename(os.path.abspath(root)) or 'project'
+
+    out: list[str] = [
+        f"# {project} — Python Project Map",
+        f"_Generated {ts} · {len(paths)} Python files · {len(resources)} resources_",
+        '',
+    ]
+
+    # Project-tree header — shows the shape of the codebase before any
+    # per-file detail. Uses scripts/tree.py via subprocess so noisy
+    # directories (logs, scans) appear as elided leaves.
+    tree_text = generate_tree_header(root)
+    if tree_text:
+        out.append("## Project Tree")
+        out.append('')
+        out.append('```')
+        out.append(tree_text.rstrip())
+        out.append('```')
+        out.append('')
+
+    groups: dict[str, list[str]] = {}
+    for path in paths:
+        rel = os.path.relpath(path, root)
+        groups.setdefault(_module_group(rel), []).append(path)
+
+    for group in sorted(groups):
+        out.append("---")
+        out.append('')
+        out.append(f"## {group}/")
+        out.append('')
+        for path in groups[group]:
+            out.extend(render_file_section(path))
+
+    if resources:
+        out.append("---")
+        out.append('')
+        out.append("## Resources")
+        out.append('')
+        res_groups: dict[str, list[tuple[str, str]]] = {}
+        for path, summary in resources:
+            rel_dir = os.path.relpath(os.path.dirname(path), root)
+            res_groups.setdefault(rel_dir, []).append((path, summary))
+
+        for rel_dir in sorted(res_groups):
+            out.append(f"### {rel_dir}/")
+            out.append('')
+            for path, summary in res_groups[rel_dir]:
+                fname = os.path.basename(path)
+                out.append(f"**{fname}** — {summary}")
+                out.append('')
+
+    return '\n'.join(out)
+
+
+# ─── CLI ─────────────────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    """Parse args and dispatch to either snapshot or map mode."""
     parser = argparse.ArgumentParser(
-        description="Concatenate all .py files with path headers."
+        description="Concatenate (default) or map a Python codebase."
     )
     parser.add_argument(
         '--root', default='.',
@@ -112,13 +545,32 @@ if __name__ == '__main__':
         '--output', default=None,
         help="Write to file instead of stdout (avoids terminal encoding issues)"
     )
+    parser.add_argument(
+        '--map', action='store_true',
+        help="Emit structured project map instead of full snapshot"
+    )
     args = parser.parse_args()
 
     extra = set(args.exclude or [])
+    abs_root = os.path.abspath(args.root)
+
+    if args.map:
+        text = render_map(abs_root, extra)
+        if args.output:
+            with open(args.output, 'w', encoding='utf-8') as fp:
+                fp.write(text)
+            print(f"Written map to {args.output}", file=sys.stderr)
+        else:
+            sys.stdout.write(text)
+        return
 
     if args.output:
-        with open(args.output, 'w', encoding='utf-8') as f:
-            run(os.path.abspath(args.root), extra, f)
-        print(f"Written to {args.output}", file=sys.stderr)
+        with open(args.output, 'w', encoding='utf-8') as fp:
+            run_snapshot(abs_root, extra, fp)
+        print(f"Written snapshot to {args.output}", file=sys.stderr)
     else:
-        run(os.path.abspath(args.root), extra, sys.stdout)
+        run_snapshot(abs_root, extra, sys.stdout)
+
+
+if __name__ == '__main__':
+    main()

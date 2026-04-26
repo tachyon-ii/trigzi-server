@@ -1,34 +1,40 @@
 #!/usr/bin/env python3
+"""
+=============================================================================
+Module:        Session Service
+Location:      core/sessions.py
+Description:   Owns all reads and writes to the `sessions` table. One row
+               per device_id. Create-or-update on every request via
+               INSERT ... ON DUPLICATE KEY UPDATE so callers never need to
+               distinguish between new and returning devices.
+
+Responsibilities:
+    - Upsert session on arrival (last_seen_at, ip, app_version)
+    - MOTD dedup: motd_last_date compared to CURRENT_DATE
+    - Token budget: daily counter with lazy reset on date rollover
+    - Tier enforcement: lazy lapse of paid → free on expiry
+
+Architecture Note:
+Tier-lapse and daily-token-reset are both handled lazily — read-time
+checks reflect the post-lapse/post-reset view without writing back.
+A separate billing job is responsible for the hard tier-state update.
+
+Usage:
+    from core.sessions import get_or_create_session, record_motd_delivered
+
+    session = await get_or_create_session(device_id, ip=ip, app_version=app_version)
+
+    if await motd_due(device_id):
+        # deliver message
+        await record_motd_delivered(device_id)
+=============================================================================
+"""
+
 from __future__ import annotations
-#
-#  core/sessions.py
-#
-#  Session service for Trigzi.
-#
-#  Owns all reads and writes to the `sessions` table.
-#  One row per device_id. Create-or-update on every request via
-#  INSERT ... ON DUPLICATE KEY UPDATE so callers never need to
-#  distinguish between new and returning devices.
-#
-#  Responsibilities:
-#    - Upsert session on arrival (last_seen_at, ip, app_version)
-#    - MOTD dedup: motd_last_date compared to CURRENT_DATE
-#    - Token budget: daily counter with lazy reset on date rollover
-#    - Tier enforcement: lazy lapse of paid → free on expiry
-#
-#  Usage:
-#      from core.sessions import get_or_create_session, record_motd_delivered
-#
-#      session = await get_or_create_session(device_id, ip=ip, app_version=app_version)
-#
-#      if await motd_due(device_id):
-#          # deliver message
-#          await record_motd_delivered(device_id)
-#
 
 import logging
+from datetime import datetime
 from typing import Optional
-
 from core.db import get_pool
 
 logger = logging.getLogger(__name__)
@@ -79,12 +85,11 @@ async def get_or_create_session(
     # Lazy tier lapse: if paid has expired, treat as free for this request.
     # (Does not write back — a separate billing job can do the hard update.)
     if row["tier"] == "paid" and row["tier_expires_at"] is not None:
-        from datetime import datetime
         if row["tier_expires_at"] < datetime.now():
             row = dict(row)
             row["tier"] = "free"
 
-    logger.debug(f"Session: device={device_id[:8]}… tier={row['tier']}")
+    logger.debug("Session: device=%s… tier=%s", device_id[:8], row['tier'])
     return row
 
 
@@ -129,7 +134,7 @@ async def record_motd_delivered(device_id: str) -> None:
                 """,
                 (device_id,),
             )
-    logger.debug(f"Session: MOTD stamped for device={device_id[:8]}…")
+    logger.debug("Session: MOTD stamped for device=%s…", device_id[:8])
 
 
 # ── Token budget ───────────────────────────────────────────────────────────────
@@ -186,4 +191,4 @@ async def consume_tokens(device_id: str, tokens_used: int) -> None:
                 """,
                 (tokens_used, device_id),
             )
-    logger.debug(f"Session: +{tokens_used} tokens for device={device_id[:8]}…")
+    logger.debug("Session: +%d tokens for device=%s…", tokens_used, device_id[:8])

@@ -1,18 +1,29 @@
 #!/usr/bin/env python3
 """
-utils/category_mapper.py — map source category strings to canonical taxonomy.
+=============================================================================
+Module:        Category Mapper
+Location:      utils/category_mapper.py
+Description:   Maps source-specific category strings (Woolworths SAP,
+               Coles native) to a canonical category/subcategory taxonomy.
 
-Canonical categories are  defined by Coles category/subcategory pairs.
-Woolworths uses SAP department/category/segment — mapped here via lookup tables.
+Architecture Note:
+Canonical categories are defined by Coles category/subcategory pairs —
+Coles is the reference taxonomy and its values pass through unchanged.
+Woolworths uses SAP department/category/segment, mapped here via two
+lookup tables (_WW_MAP for exact matches, _WW_DEPT_FALLBACK for
+department-only fallbacks). New supermarket providers add their own
+mapper function alongside; the canonical (cat, sub) tuple is the
+contract every provider returns.
 
 Usage:
     from utils.category_mapper import map_woolworths, map_coles
 
     cat, sub = map_woolworths(sap_department, sap_category, sap_segment)
     cat, sub = map_coles(coles_category, coles_subcategory)
+=============================================================================
 """
 
-from typing import Optional, Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Woolworths SAP → Canonical (category, subcategory)
@@ -139,11 +150,16 @@ _WW_DEPT_FALLBACK: Dict[str, Tuple[str, str]] = {
 def map_woolworths(
     sap_department: Optional[str],
     sap_category: Optional[str],
-    sap_segment: Optional[str] = None,
+    sap_segment: Optional[str] = None,  # pylint: disable=unused-argument
 ) -> Tuple[str, str]:
     """
     Map Woolworths SAP fields to (canonical_category, canonical_subcategory).
     Returns ("", "") if no mapping found.
+
+    The ``sap_segment`` parameter is reserved for future segment-level
+    refinement of the lookup; current implementations only key on
+    (department, category). Callers pass it ahead of any rule-set
+    upgrade so the signature stays stable.
     """
     dept = (sap_department or "").strip().upper()
     cat  = (sap_category  or "").strip().upper()

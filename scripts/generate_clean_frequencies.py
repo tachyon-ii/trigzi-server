@@ -1,29 +1,50 @@
 #!/usr/bin/env python3
 """
-generate_clean_frequencies.py
-Streams the raw OFF database dump through the production ingredient parser.
-Outputs a clean, frequency-sorted TSV of true semantic tokens.
+=============================================================================
+Module:        Clean Ingredient Frequency Generator
+Location:      scripts/generate_clean_frequencies.py
+Description:   Streams the raw OFF database dump through the production
+               ingredient parser and emits a frequency-sorted TSV of
+               true semantic tokens (Zipf-distribution: highest frequency
+               first).
+
+Architecture Note:
+This is a one-shot data-mining pass — run it after a fresh OFF import
+to refresh the canonical ingredient frequency table used by the
+ingredient_parser's tier classification. Output goes to
+clean_ingredient_frequencies.tsv in the working directory; downstream
+consumers move it into utils/ as needed.
+
+Usage:
+    ./scripts/generate_clean_frequencies.py
+=============================================================================
 """
 
-import sys
 import os
+import sys
 import time
 from collections import Counter
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from utils.ingredient_parser import parse_ingredients
+try:
+    from utils.ingredient_parser import parse_ingredients
+except ImportError:
+    # Allow running from project root without installing the package
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from utils.ingredient_parser import parse_ingredients
 
 INPUT_FILE = "/var/lib/mysql-files/raw_ingredients_dump.txt"
 OUTPUT_FILE = "clean_ingredient_frequencies.tsv"
 
+
 def main():
+    """Stream the OFF dump through parse_ingredients and emit frequency-sorted tokens."""
     counter = Counter()
     lines_processed = 0
     start_time = time.time()
 
     print(f"📖 Streaming raw MySQL dump from {INPUT_FILE}...")
     print("🧠 Engaging Production Lexer. This may take a few minutes...")
-    
+
     try:
         with open(INPUT_FILE, 'r', encoding='utf-8') as f:
             for line in f:
@@ -39,7 +60,7 @@ def main():
                     counter[t] += 1
 
                 lines_processed += 1
-                
+
                 # Progress monitor
                 if lines_processed % 50000 == 0:
                     elapsed = time.time() - start_time
@@ -60,6 +81,7 @@ def main():
             out_f.write(f"{token}\t{count}\n")
 
     print("🎉 Clean Frequency Generation Complete.")
+
 
 if __name__ == "__main__":
     main()

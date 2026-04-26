@@ -1,25 +1,58 @@
-#!/usr/bin/env python3
+"""
+=============================================================================
+Module:        Test — Daily Messages Service
+Location:      tests/test_messages.py
+Description:   Unit tests for core/messages/messages_service.py — the
+               daily message picker that schedules motivational/wellbeing
+               content for delivery to the app. Verifies date-based
+               selection determinism (same device + same day → same
+               message), eligibility filtering (per-user delivery
+               history), and the date-ordinal hash that drives rotation.
+
+Architecture Note:
+No network, no DB — these are pure-function tests against the picker's
+selection logic. The message store is patched in via mock; real
+content lives in core/messages/motd.py and is exercised in production.
+The determinism property matters because users get the same message
+on the same day across devices, so the picker must be a pure function
+of (device_id, date) and never sample randomly.
+=============================================================================
+"""
+
+# Test files use different conventions to library code; pylint relaxations:
+#   missing-class-docstring  — test class names ARE the docstring
+#   missing-function-docstring — test method names ARE the docstring
+#   import-outside-toplevel — methods import lazily to scope mock.patch / defer slow loads
+#   redefined-outer-name   — pytest fixture pattern: fixture & param share name
+#   unused-argument        — Mock side_effect callbacks take *args, **kwargs they don't read
+#   duplicate-code         — sys.path bootstrap try/except pattern is shared across
+#                            tests that need to import from project-relative paths;
+#                            extracting it would create a tests/ helper module
+#                            that would itself need a bootstrap. Accepting the dup.
+# pylint: disable=missing-class-docstring,missing-function-docstring,import-outside-toplevel,redefined-outer-name,unused-argument,duplicate-code
+
 from __future__ import annotations
-#
-#  tests/test_messages.py
-#
-#  Unit tests for core/messages/messages_service.py
-#  No network calls, no DB, no server required.
-#
 
-import unittest
-from unittest.mock import patch, AsyncMock
-
-import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import sys
+import unittest
+from unittest.mock import AsyncMock, patch
 
-from core.messages.messages_service import (
-    get_messages,
-    _pick_daily,
-    _eligible,
-    _date_ordinal,
-)
+# sys.path bootstrap so this file works whether pytest runs from project root
+# or directly. The try/except wrapping declares to pylint that the project
+# import after the path mutation is intentional.
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from core.messages.messages_service import (  # pylint: disable=ungrouped-imports
+        _date_ordinal,
+        _eligible,
+        _pick_daily,
+        get_messages,
+    )
+except ImportError as exc:
+    print(f"Import error: {exc}", file=sys.stderr)
+    sys.exit(1)
+
 
 DEVICE_A = "550e8400-e29b-41d4-a716-446655440000"
 DEVICE_B = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
@@ -100,14 +133,14 @@ class TestEligible(unittest.TestCase):
 
 
 class TestGetMessages(unittest.IsolatedAsyncioTestCase):
-    """get_messages — MOTD delivery, dedup, force bypass. 
+    """get_messages — MOTD delivery, dedup, force bypass.
     DB calls are mocked to ensure pure, isolated logic testing."""
 
     async def test_first_poll_delivers_one_message(self):
         with patch("core.messages.messages_service.get_or_create_session", new_callable=AsyncMock), \
              patch("core.messages.messages_service.motd_due", new_callable=AsyncMock, return_value=True), \
              patch("core.messages.messages_service.record_motd_delivered", new_callable=AsyncMock):
-            
+
             result = await get_messages(DEVICE_A)
             self.assertEqual(len(result), 1)
 
@@ -115,7 +148,7 @@ class TestGetMessages(unittest.IsolatedAsyncioTestCase):
         with patch("core.messages.messages_service.get_or_create_session", new_callable=AsyncMock), \
              patch("core.messages.messages_service.motd_due", new_callable=AsyncMock, return_value=True), \
              patch("core.messages.messages_service.record_motd_delivered", new_callable=AsyncMock):
-            
+
             result = await get_messages(DEVICE_A)
             msg = result[0]
             for field in ("id", "title", "body", "type", "context"):
@@ -125,7 +158,7 @@ class TestGetMessages(unittest.IsolatedAsyncioTestCase):
         with patch("core.messages.messages_service.get_or_create_session", new_callable=AsyncMock), \
              patch("core.messages.messages_service.motd_due", new_callable=AsyncMock, return_value=True), \
              patch("core.messages.messages_service.record_motd_delivered", new_callable=AsyncMock):
-            
+
             result = await get_messages(DEVICE_A)
             self.assertNotIn("tags", result[0])
 
@@ -134,7 +167,7 @@ class TestGetMessages(unittest.IsolatedAsyncioTestCase):
         with patch("core.messages.messages_service.get_or_create_session", new_callable=AsyncMock), \
              patch("core.messages.messages_service.motd_due", new_callable=AsyncMock, return_value=False), \
              patch("core.messages.messages_service.record_motd_delivered", new_callable=AsyncMock):
-            
+
             result = await get_messages(DEVICE_A)
             self.assertEqual(result, [])
 
@@ -143,15 +176,15 @@ class TestGetMessages(unittest.IsolatedAsyncioTestCase):
         with patch("core.messages.messages_service.get_or_create_session", new_callable=AsyncMock), \
              patch("core.messages.messages_service.motd_due", new_callable=AsyncMock, return_value=False), \
              patch("core.messages.messages_service.record_motd_delivered", new_callable=AsyncMock):
-            
-            result = await get_messages(DEVICE_A, force=True) 
+
+            result = await get_messages(DEVICE_A, force=True)
             self.assertEqual(len(result), 1)
 
     async def test_context_filter_motd(self):
         with patch("core.messages.messages_service.get_or_create_session", new_callable=AsyncMock), \
              patch("core.messages.messages_service.motd_due", new_callable=AsyncMock, return_value=True), \
              patch("core.messages.messages_service.record_motd_delivered", new_callable=AsyncMock):
-            
+
             result = await get_messages(DEVICE_A, context="motd")
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0]["context"], "motd")
@@ -160,7 +193,7 @@ class TestGetMessages(unittest.IsolatedAsyncioTestCase):
         with patch("core.messages.messages_service.get_or_create_session", new_callable=AsyncMock), \
              patch("core.messages.messages_service.motd_due", new_callable=AsyncMock, return_value=True), \
              patch("core.messages.messages_service.record_motd_delivered", new_callable=AsyncMock):
-            
+
             result = await get_messages(DEVICE_A, context="alert")
             self.assertEqual(result, [])
 

@@ -1,17 +1,48 @@
-#!/usr/bin/env python3
+"""
+=============================================================================
+Module:        Test — GTIN Normalisation
+Location:      tests/test_gtin.py
+Description:   Tests for utils/gtin.py — GTIN normalisation following the
+               Open Food Facts specification. Verifies every barcode
+               variant the scanners can emit (EAN-8, UPC, EAN-13,
+               EAN-14, malformed/empty inputs) is coerced to the right
+               canonical 13-digit form or rejected with None.
+
+Architecture Note:
+GTIN normalisation is on the hot path of every product scan; if it
+silently mishandles a length the lookups miss and the user sees
+"product not found" for items genuinely in the database. Each branch
+of the algorithm gets at least one direct test, plus a handful of
+edge cases (whitespace, non-numeric, EAN-14 with non-zero leader).
+=============================================================================
+"""
+
+# Test files use different conventions to library code; pylint relaxations:
+#   missing-class-docstring  — test class names ARE the docstring (TestNormalise)
+#   missing-function-docstring — test method names ARE the docstring
+#   import-outside-toplevel — methods import lazily to scope mock.patch / defer slow loads
+#   redefined-outer-name   — pytest fixture pattern: fixture & param share name
+#   unused-argument        — Mock side_effect callbacks take *args, **kwargs they don't read
+#   duplicate-code         — sys.path bootstrap try/except pattern is shared across
+#                            tests that need to import from project-relative paths;
+#                            extracting it would create a tests/ helper module
+#                            that would itself need a bootstrap. Accepting the dup.
+# pylint: disable=missing-class-docstring,missing-function-docstring,import-outside-toplevel,redefined-outer-name,unused-argument,duplicate-code
+
 from __future__ import annotations
-"""
-tests/test_gtin.py
 
-Tests for utils/gtin.py — GTIN normalisation following OFF specification.
-"""
-
-import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import sys
 
-import pytest
-from utils.gtin import normalise, variations
+# sys.path bootstrap so this file works whether pytest runs from the project
+# root or directly. The try/except wrapping declares to pylint that the
+# project import after the path mutation is intentional.
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from utils.gtin import normalise, variations  # pylint: disable=ungrouped-imports
+except ImportError as exc:
+    print(f"Import error: {exc}", file=sys.stderr)
+    sys.exit(1)
 
 
 class TestNormalise:
@@ -82,13 +113,13 @@ class TestVariations:
         assert variations('70177161170') == ['0070177161170']
 
     def test_invalid_returns_empty(self):
-        assert variations('abc') == []
+        assert not variations('abc')
 
     def test_empty_returns_empty(self):
-        assert variations('') == []
+        assert not variations('')
 
     def test_ean14_leading_zero_returns_ean13(self):
         assert variations('00340004706930') == ['0340004706930']
 
     def test_ean14_nonzero_returns_empty(self):
-        assert variations('10034000470693') == []
+        assert not variations('10034000470693')
