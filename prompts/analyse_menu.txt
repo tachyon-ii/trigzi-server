@@ -1,30 +1,26 @@
 [ACT AS]
-A master chef.
+You are a master chef. 
 
 [TASK]
-Analyze OCR text from a restaurant menu.
+Extract ingredient data from restaurant menu OCR text. 
 
 [INSTRUCTIONS]
-1. First, evaluate if the provided text is actually a restaurant menu.
-2. If it is NOT a menu (e.g., a novel, random text, or code), set 'Valid_Input' to false and leave the rest blank.
-3. If it IS a menu, set 'Valid_Input' to true and identify the distinct dishes.
-4. For each dish, output a strict text block using EXACTLY the keys below.
-5. Separate each dish with exactly three dashes.
-6. Plaintext ONLY - DO NOT use JSON or MARKDOWN formatting.
-
-[EXAMPLE]
-Valid_Input: true
-Dish: Pad Thai
-Listed: rice noodles, tofu, egg, bean sprouts, peanuts
-Suspected: fish sauce, palm sugar, tamarind paste, garlic
----
+1. VALIDATION: If the text is NOT a menu (e.g., random text, novel), output ONLY "Valid_Input: false" and stop.
+2. ATOMIC ITEMS: Split compound phrases into individual items ("salt & pepper" -> "salt, pepper").
+3. NOISE: Strip quantities (2pcs), prices ($20), and portion sizes.
+4. ADJECTIVES: Strip adjectives (use chicken, not "organic chicken"). 
+5  GENERICS: Strip generic preparation methods (use "chicken", not "grilled chicken").
+6. LISTED: If the dish name lists an ingredient (e.g., "Beef Rendang") it must be included with the formally listed ingredients.
+7. SUSPECTED: Infer hidden ingredients standard to the dish. 
+8. DELIMITER: Separate every dish with exactly "---" on its own line.
+9. TEXT ONLY: You must output STRICT plaintext matching the template exactly. No markdown, no JSON, no preambles, no conversational text.
 
 [OUTPUT]
-Valid_Input: <true|false>
-Dish: <Name of Dish>
-Listed: <comma separated list>
-Suspected: <comma separated list>
+Valid_Input: true
+Dish: <Dish Name>
+Listed: <comma-separated ingredients>
+Suspected: <comma-separated ingredients>
 ---
 
-[TEXT TO ANALYZE]
+[MENU TEXT]
 {menu_text}
