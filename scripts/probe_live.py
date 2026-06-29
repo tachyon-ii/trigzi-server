@@ -70,11 +70,12 @@ async def probe_provider(name: str, provider) -> ProviderStatus:
 
 
 def _format_model_line(name: str, metadata: dict) -> str:
-    """
-    Render a single model name for terminal display, optionally appending
-    a [YYYY-MM-DD] suffix when the provider exposed a release date in
-    metadata. This formatting used to live inside OpenAIProbeMixin —
-    moved here so the probe layer stays presentation-agnostic.
+    """Render a single model name for terminal display.
+
+    Optionally appends a [YYYY-MM-DD] suffix when the provider exposed a
+    release date in metadata. This formatting used to live inside
+    OpenAIProbeMixin — moved here so the probe layer stays
+    presentation-agnostic.
     """
     info = metadata.get(name, {}) if metadata else {}
     created = info.get("created_at")
@@ -85,18 +86,16 @@ def _format_model_line(name: str, metadata: dict) -> str:
 
 def print_status(status: ProviderStatus) -> None:
     """Render a single ProviderStatus snapshot to stdout in human-readable form."""
-    icon    = "✅" if status.is_reachable else "❌"
-    credit  = f"  credit_remaining={status.credit_remaining}" if status.credit_remaining is not None else ""
-    valid   = "✓ default model found" if status.default_model_valid else "✗ DEFAULT MODEL NOT IN CATALOGUE"
-    error   = f"  error={status.error}" if status.error else ""
+    icon   = "✅" if status.is_reachable else "❌"
+    credit = f"  credit_remaining={status.credit_remaining}" if status.credit_remaining is not None else ""
+    valid  = "✓ default model found" if status.default_model_valid else "✗ DEFAULT MODEL NOT IN CATALOGUE"
+    error  = f"  error={status.error}" if status.error else ""
 
     print(f"\n  {icon} {status.provider}")
     print(f"     latency       : {status.latency_ms}ms")
     print(f"     default model : {valid}")
     print(f"     models found  : {len(status.available_models)}")
 
-    # Show the complete list in the order provided by the backend.
-    # Append a [YYYY-MM-DD] release date if metadata exposed one.
     if status.available_models:
         for m in status.available_models:
             print(_format_model_line(m, status.model_metadata))
@@ -112,10 +111,9 @@ async def main(targets: list[str]) -> None:
     print("\n── Live Provider Probe ─────────────────────────────────────")
     print(f"   Targets: {', '.join(targets)}\n")
 
-    # Check keys first
     keys = check_env_keys()
     for name in targets:
-        if not keys.get(name, True):  # unknown providers pass through
+        if not keys.get(name, True):
             print(f"  ⚠️  {name}: no API key found in environment — skipping")
 
     print()
@@ -132,10 +130,9 @@ async def main(targets: list[str]) -> None:
         results.append(status)
         print_status(status)
 
-    # Summary
     print("\n── Summary ─────────────────────────────────────────────────")
     for s in results:
-        icon = "✅" if s.is_reachable else "❌"
+        icon   = "✅" if s.is_reachable else "❌"
         credit = f"  credit={s.credit_remaining}" if s.credit_remaining is not None else ""
         print(f"  {icon} {s.provider:<10} {s.latency_ms:>5}ms  {len(s.available_models):>3} models{credit}")
 

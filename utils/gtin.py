@@ -7,18 +7,33 @@ Description:   GTIN normalisation following the Open Food Facts barcode
                specification. Coerces every barcode variant the scanners
                might emit (EAN-8, UPC-A, UPC-E, EAN-13, EAN-14) into the
                canonical 13-digit EAN-13 form, or returns None for any
-               input that's invalid or non-consumer.
+               input that is structurally unsalvageable.
 
 Architecture Note:
-The algorithm:
-  - Strip leading zeros to get numeric value
-  - < 13 digits → zfill(13)   — covers EAN-8, UPC-A, UPC-E etc.
-  - 13 digits   → as-is       — EAN-13 canonical
-  - 14 digits starting with 0 → strip leading 0 → EAN-13
-  - 14 digits starting with non-0 → None (genuine EAN-14, non-consumer)
+normalise() is structural coercion only — it does NOT validate the GS1
+check digit. Reasons:
+
+  1. The database is pre-cleaned: every GTIN in the products table has
+     already been validated and any failures deleted (see test_gs1.py /
+     delete_invalid_gtins.sql). Revalidating on the read path adds no
+     safety.
+
+  2. Real scanners can produce slightly mangled reads (transposition,
+     worn barcodes). Rejecting these at normalisation creates false
+     negatives — the lookup would have found the product anyway.
+
+  3. The check digit is meaningful for data entry and export pipelines,
+     not for lookup.
+
+is_valid_gs1() is kept for use in data-quality tooling (test_gs1.py,
+import pipelines) where it belongs.
+
+The normalisation algorithm:
+  - Strip whitespace; reject non-numeric and empty inputs.
   - > 14 digits → None (invalid/placeholder)
-  - No valid digits → None
-  - Fails GS1 check digit → None
+  - 14 digits, leading 0 → strip leading 0 → 13-digit candidate
+  - 14 digits, non-zero leader → None (genuine EAN-14, non-consumer)
+  - <= 13 digits → zfill(13)
 
 Reference: https://wiki.openfoodfacts.org/Barcode_normalization
 =============================================================================
@@ -30,13 +45,14 @@ from typing import List, Optional
 
 
 def is_valid_gs1(gtin: str) -> bool:
-    """
-    Validate a GTIN against the GS1 check digit algorithm.
+    """Validate a GTIN against the GS1 check digit algorithm.
+
+    For use in data-quality pipelines and export validation — NOT on the
+    product lookup read path. See module docstring.
 
     GS1 barcodes (EAN-8, EAN-13, UPC-A, ITF-14) use alternating weights
-    of 1 and 3 — not the credit-card Luhn algorithm (which uses 1 and 2).
-    The check digit is the last digit; it makes the weighted sum divisible
-    by 10.
+    of 1 and 3. The check digit is the last digit; it makes the weighted
+    sum divisible by 10.
     """
     if not gtin.isdigit() or len(gtin) < 2:
         return False
@@ -49,9 +65,11 @@ def is_valid_gs1(gtin: str) -> bool:
 
 
 def normalise(gtin: str) -> Optional[str]:
-    """
-    Normalise a GTIN to its canonical EAN-13 form.
-    Returns None if the GTIN is invalid, non-consumer, or fails the GS1 check digit.
+    """Coerce a scanned GTIN to its canonical 13-digit form.
+
+    Returns None only for structurally unsalvageable input: non-numeric,
+    empty, over 14 digits, or a genuine (non-zero-leading) EAN-14.
+    Does NOT apply GS1 check digit validation — see module docstring.
     """
     if not gtin or not isinstance(gtin, str):
         return None
@@ -67,21 +85,16 @@ def normalise(gtin: str) -> Optional[str]:
 
     if n == 14:
         if gtin[0] == '0':
-            candidate = gtin[1:]   # trim leading 0 → 13 digits
-        else:
-            return None            # genuine EAN-14, non-consumer
-    else:
-        candidate = gtin.zfill(13)
+            return gtin[1:]    # strip leading 0 → 13 digits
+        return None            # genuine EAN-14, non-consumer
 
-    if not is_valid_gs1(candidate):
-        return None
-
-    return candidate
+    # n <= 13: zero-pad to 13
+    return gtin.zfill(13)
 
 
 def variations(gtin: str) -> List[str]:
-    """
-    Return lookup candidates for a scanned GTIN.
+    """Return lookup candidates for a scanned GTIN.
+
     Always returns at most one candidate — the normalised form.
     """
     canonical = normalise(gtin)

@@ -140,6 +140,7 @@ All GTINs normalised to EAN-13 via `utils/gtin.normalise()`:
 - `14 digits, non-zero leader` → drop (EAN-14, non-consumer)
 - `> 14 digits` → drop (invalid)
 - Non-digit input → drop
+- GS1 check digit — not applied on the read path. The database is pre-cleaned; applying check digit validation to zero-padded short barcodes produces false positives on legitimate scans. Check digit validation belongs in import pipelines and is covered by test_gs1.py.
 
 ---
 

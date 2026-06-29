@@ -14,29 +14,21 @@ silently mishandles a length the lookups miss and the user sees
 "product not found" for items genuinely in the database. Each branch
 of the algorithm gets at least one direct test, plus a handful of
 edge cases (whitespace, non-numeric, EAN-14 with non-zero leader).
+
+normalise() does NOT validate the GS1 check digit — that is a data-
+quality concern handled at import time and verified by test_gs1.py.
+These tests only cover structural coercion.
 =============================================================================
 """
 
-# Test files use different conventions to library code; pylint relaxations:
-#   missing-class-docstring  — test class names ARE the docstring (TestNormalise)
-#   missing-function-docstring — test method names ARE the docstring
-#   import-outside-toplevel — methods import lazily to scope mock.patch / defer slow loads
-#   redefined-outer-name   — pytest fixture pattern: fixture & param share name
-#   unused-argument        — Mock side_effect callbacks take *args, **kwargs they don't read
-#   duplicate-code         — sys.path bootstrap try/except pattern is shared across
-#                            tests that need to import from project-relative paths;
-#                            extracting it would create a tests/ helper module
-#                            that would itself need a bootstrap. Accepting the dup.
-# pylint: disable=missing-class-docstring,missing-function-docstring,import-outside-toplevel,redefined-outer-name,unused-argument,duplicate-code
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=import-outside-toplevel,redefined-outer-name,unused-argument,duplicate-code
 
 from __future__ import annotations
 
 import os
 import sys
 
-# sys.path bootstrap so this file works whether pytest runs from the project
-# root or directly. The try/except wrapping declares to pylint that the
-# project import after the path mutation is intentional.
 try:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
     from utils.gtin import normalise, variations  # pylint: disable=ungrouped-imports

@@ -25,9 +25,21 @@ Map mode adds two more:
     schemas, prompt previews). Each entry is a path relative to --root.
   - MAP_RESOURCE_EXTS — which file types in those dirs get summarised.
 
+Tree generation:
+  The project tree is emitted in BOTH snapshot and map mode. It is built
+  by the inline _tree_walk / generate_tree pair, which reads root/.gitignore
+  (if present) and uses it to prune the display — this is the main reason
+  for a custom tree rather than shelling out to system tree(1), which has
+  no awareness of project-specific ignores. No subprocess dependency.
+
+  The boundary is deliberate: .gitignore governs what appears in the tree
+  (large data files, external sources, generated artefacts), while
+  MAP_INCLUDE_DIRS governs what the resource scanner summarises. Many
+  resource files are gitignored precisely because of their size or origin,
+  but their schema is still useful context in the map.
+
 The map's structural extraction uses the standard library ast module —
-no third-party deps. Banner docstrings are parsed with one regex pass
-over the module-level string at AST node 0.
+no third-party deps.
 
 Usage:
     ./scripts/tarzan.py                            # snapshot to stdout
@@ -43,9 +55,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import os
 import re
-import subprocess
 import sys
 from datetime import datetime
 
@@ -83,7 +95,9 @@ DIR_REJECT_EXTENSIONS = {
 # ─── Map-mode policy ─────────────────────────────────────────────────────────
 
 # Directories scanned for resource-schema summaries (relative to --root).
-# Add more here without code changes.
+# Intentionally independent of .gitignore: large data files and external
+# corpora are often gitignored because of their size or origin, but their
+# schema is still useful context in the map.
 MAP_INCLUDE_DIRS = [
     'data',
     'prompts',
@@ -95,7 +109,7 @@ MAP_INCLUDE_DIRS = [
 MAP_RESOURCE_EXTS = ('.json', '.jsonl', '.txt')
 
 
-# ─── Snapshot mode (existing behaviour) ──────────────────────────────────────
+# ─── Snapshot-mode helpers ────────────────────────────────────────────────────
 
 
 def excluded_dir(name: str) -> bool:
@@ -112,12 +126,7 @@ def excluded_file(name: str) -> bool:
 
 
 def dir_rejects_file(rel_path: str) -> bool:
-    """True if any ancestor directory of rel_path rejects this file's extension.
-
-    Walks the relative-path ancestors and checks each against
-    DIR_REJECT_EXTENSIONS. Applies recursively — if ``html`` rejects
-    ``.txt``, then ``html/foo.txt`` AND ``html/css/bar.txt`` both fail.
-    """
+    """True if any ancestor directory of rel_path rejects this file's extension."""
     _, ext = os.path.splitext(rel_path)
     if not ext:
         return False
@@ -133,7 +142,6 @@ def collect(root: str, extra_exclude: set) -> list[str]:
     """Return sorted list of file paths under root, applying exclude rules."""
     paths = []
     for dirpath, dirnames, filenames in os.walk(root):
-        # Prune excluded dirs in-place so os.walk doesn't descend into them
         dirnames[:] = sorted(
             d for d in dirnames
             if not excluded_dir(d) and d not in extra_exclude
@@ -142,7 +150,7 @@ def collect(root: str, extra_exclude: set) -> list[str]:
             if excluded_file(filename):
                 continue
             full_path = os.path.join(dirpath, filename)
-            rel_path = os.path.relpath(full_path, root)
+            rel_path  = os.path.relpath(full_path, root)
             if dir_rejects_file(rel_path):
                 continue
             paths.append(full_path)
@@ -150,14 +158,7 @@ def collect(root: str, extra_exclude: set) -> list[str]:
 
 
 def header(path: str, root: str) -> str:
-    """Render the per-file boundary marker that precedes each concatenated body.
-
-    Uses HTML-comment markers so the snapshot stays valid Markdown — the
-    boundaries are invisible to a renderer but unambiguous to anyone or
-    anything reading the raw text. No END FILE counterpart: the next
-    BEGIN FILE is the implicit terminator, and the file at the very end
-    of the snapshot is bounded by EOF.
-    """
+    """Render the per-file boundary marker that precedes each concatenated body."""
     rel = os.path.relpath(path, root)
     try:
         size = os.path.getsize(path)
@@ -178,11 +179,19 @@ def run_snapshot(root: str, extra_exclude: set, output) -> None:
     """Walk root, concatenate every included file's contents to output with markers."""
     paths = collect(root, extra_exclude)
 
-    ts  = datetime.now().strftime('%Y-%m-%d %H:%M')
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M')
     output.write("<!--- TARZAN SNAPSHOT --->\n")
     output.write(f"<!--- GENERATED: {ts} --->\n")
     output.write(f"<!--- ROOT: {os.path.abspath(root)} --->\n")
     output.write(f"<!--- FILES: {len(paths)} --->\n")
+
+    # Project tree — present in both snapshot and map mode.
+    tree_text = generate_tree(root)
+    if tree_text:
+        output.write("\n<!--- PROJECT TREE --->\n")
+        output.write("```\n")
+        output.write(tree_text.rstrip())
+        output.write("\n```\n")
 
     for path in paths:
         output.write(header(path, root))
@@ -192,6 +201,130 @@ def run_snapshot(root: str, extra_exclude: set, output) -> None:
         except OSError as e:
             output.write(f"<!--- ERROR reading file: {e} --->\n")
         output.write('\n')
+
+
+# ─── .gitignore parser ────────────────────────────────────────────────────────
+
+
+def _load_gitignore(root: str) -> list[str]:
+    """Return non-comment, non-empty lines from root/.gitignore, or []."""
+    path = os.path.join(root, '.gitignore')
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            return [
+                ln.rstrip('\n')
+                for ln in f
+                if ln.strip() and not ln.startswith('#')
+            ]
+    except OSError:
+        return []
+
+
+def _gitignore_matcher(patterns: list[str], root: str):
+    """Return a callable(abs_path, is_dir) -> bool that applies gitignore patterns.
+
+    Handles the subset of gitignore syntax that appears in typical server
+    .gitignore files:
+      - Plain names:    logs        matches any entry named "logs" anywhere
+      - Glob patterns:  *.pyc       matched against the bare name
+      - Dir patterns:   data/       only matches directories
+      - Rooted:         /foo        only matches at the root level
+      - Negations:      !important  re-includes a previously excluded path
+                        (applied in order; last match wins, per git semantics)
+
+    Double-star (**) and character-class ([abc]) patterns are not implemented
+    — they don't appear in typical server .gitignore files and the added
+    complexity isn't warranted for a display tool.
+    """
+    abs_root = os.path.abspath(root)
+
+    # Compile each raw line into (negated, dir_only, rooted, pattern)
+    compiled: list[tuple[bool, bool, bool, str]] = []
+    for raw in patterns:
+        negated  = raw.startswith('!')
+        stripped = raw.lstrip('!')
+        dir_only = stripped.endswith('/')
+        pattern  = stripped.rstrip('/')
+        rooted   = pattern.startswith('/')
+        if rooted:
+            pattern = pattern.lstrip('/')
+        compiled.append((negated, dir_only, rooted, pattern))
+
+    def matches(abs_path: str, is_dir: bool) -> bool:
+        rel  = os.path.relpath(abs_path, abs_root).replace('\\', '/')
+        name = os.path.basename(abs_path)
+        result = False
+        for negated, dir_only, rooted, pattern in compiled:
+            if dir_only and not is_dir:
+                continue
+            if rooted:
+                hit = fnmatch.fnmatch(rel, pattern) or rel == pattern
+            else:
+                # Match against bare name OR any path segment
+                hit = fnmatch.fnmatch(name, pattern) or any(
+                    fnmatch.fnmatch(part, pattern)
+                    for part in rel.split('/')
+                )
+            if hit:
+                result = not negated
+        return result
+
+    return matches
+
+
+# ─── Inline tree walker ───────────────────────────────────────────────────────
+
+
+def _tree_walk(root_path: str, gitignored, prefix: str = '') -> list[str]:
+    """Recursive tree printer. Applies EXCLUDE_DIRS, EXCLUDE_FILES, and .gitignore.
+
+    gitignored is the callable returned by _gitignore_matcher. Directories and
+    files that are gitignored are pruned from the display. The resource scanner
+    (collect_resource_files) is kept deliberately separate — gitignored data
+    files still appear in the map's Resources section because their schema is
+    useful context even when their bulk is not in the repo.
+    """
+    out: list[str] = []
+    try:
+        entries = sorted(
+            os.scandir(root_path),
+            key=lambda e: (not e.is_dir(), e.name.lower()),
+        )
+    except (PermissionError, OSError):
+        return out
+
+    entries = [
+        e for e in entries
+        if not (e.is_dir()  and (excluded_dir(e.name) or gitignored(e.path, True)))
+        and not (e.is_file() and (e.name in EXCLUDE_FILES or gitignored(e.path, False)))
+    ]
+
+    for i, entry in enumerate(entries):
+        is_last   = i == len(entries) - 1
+        connector = '└── ' if is_last else '├── '
+        extension = '    ' if is_last else '│   '
+        out.append(f"{prefix}{connector}{entry.name}")
+        if entry.is_dir():
+            out.extend(_tree_walk(entry.path, gitignored, prefix + extension))
+
+    return out
+
+
+def generate_tree(root: str) -> str:
+    """Return a tree(1)-style listing of the project rooted at ``root``.
+
+    Reads root/.gitignore (if present) and uses it to prune the display.
+    Also applies EXCLUDE_DIRS / EXCLUDE_FILES from module scope so the tree
+    is consistent with what the snapshot actually concatenates.
+    No subprocess or external dependency.
+    """
+    abs_root   = os.path.abspath(root)
+    patterns   = _load_gitignore(abs_root)
+    gitignored = _gitignore_matcher(patterns, abs_root)
+
+    lines = [abs_root]
+    lines.extend(_tree_walk(abs_root, gitignored))
+    return '\n'.join(lines)
 
 
 # ─── Map mode: AST-based structural extraction ───────────────────────────────
@@ -209,7 +342,7 @@ def collect_python_files(root: str, extra_exclude: set) -> list[str]:
             if not filename.endswith('.py') or filename in EXCLUDE_FILES:
                 continue
             full_path = os.path.join(dirpath, filename)
-            rel_path = os.path.relpath(full_path, root)
+            rel_path  = os.path.relpath(full_path, root)
             if dir_rejects_file(rel_path):
                 continue
             paths.append(full_path)
@@ -217,13 +350,7 @@ def collect_python_files(root: str, extra_exclude: set) -> list[str]:
 
 
 def extract_docstring_body(docstring: str | None) -> str:
-    """Return the docstring text with the surrounding === ruler lines stripped.
-
-    The banner format is already the human-readable form — humans wrote
-    those alignment columns deliberately. Parsing it into a dict and
-    re-rendering would lose that formatting. Just slice the rulers off
-    and pass the rest through verbatim.
-    """
+    """Return the docstring text with the surrounding === ruler lines stripped."""
     if not docstring:
         return ''
     lines = [
@@ -234,31 +361,21 @@ def extract_docstring_body(docstring: str | None) -> str:
 
 
 def signature_for(node: ast.AST, source: str) -> str:
-    """Return the verbatim signature line(s) for a class or function from source.
-
-    Uses raw source slicing rather than ast.unparse so the developer's
-    formatting (line breaks, type-hint alignment) is preserved exactly.
-    Strips trailing inline comments (e.g. ``# pylint: disable=...``)
-    that would otherwise pollute the rendered skeleton.
-    """
+    """Return the verbatim signature line(s) for a class or function from source."""
     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return ''
 
     try:
         src_lines = source.splitlines()
-        start = node.lineno - 1   # ast lineno is 1-indexed
-        end = (node.body[0].lineno - 1) if node.body else (start + 1)
+        start = node.lineno - 1
+        end   = (node.body[0].lineno - 1) if node.body else (start + 1)
 
         sig_lines = src_lines[start:end]
         if sig_lines:
             last = sig_lines[-1]
-            # Strip trailing inline comment ('  # ...') first
             comment_idx = last.find('  #')
             if comment_idx >= 0:
                 last = last[:comment_idx].rstrip()
-            # Trim everything after the function-def colon (which ends the
-            # signature). This is the LAST colon on the line because type
-            # hints inside parens never have a trailing-paren-then-colon.
             colon_idx = last.rfind(':')
             if colon_idx >= 0:
                 sig_lines[-1] = last[:colon_idx + 1]
@@ -274,21 +391,15 @@ def is_interesting_method(name: str) -> bool:
     """Filter for which dunder methods to include in the map."""
     if not name.startswith('_'):
         return True
-    # Whitelist: __init__ documents construction shape; other dunders are noise
     if name == '__init__':
         return True
     if name.startswith('__') and name.endswith('__'):
         return False
-    # Single-underscore private methods are part of the class's API surface
     return True
 
 
 def extract_top_level_constants(tree: ast.Module) -> list[str]:
-    """Return UPPER_CASE module-level assignments rendered as 'NAME = ...'.
-
-    Skips type-annotation-only assignments and non-uppercase names.
-    Truncates RHS for readability.
-    """
+    """Return UPPER_CASE module-level assignments rendered as 'NAME = ...'."""
     constants = []
     for node in tree.body:
         if not isinstance(node, ast.Assign):
@@ -310,12 +421,7 @@ def extract_top_level_constants(tree: ast.Module) -> list[str]:
 
 
 def extract_declarations(source: str) -> tuple[list[str], list[str]]:
-    """AST-walk a Python source file, return (signatures, constants).
-
-    Signatures preserve indentation so methods nest under their class
-    visually. Constants are rendered after classes/functions so the
-    structural skeleton reads top-to-bottom like the source itself.
-    """
+    """AST-walk a Python source file, return (signatures, constants)."""
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
@@ -349,15 +455,7 @@ def extract_declarations(source: str) -> tuple[list[str], list[str]]:
 
 
 def summarise_resource(path: str) -> str:
-    """Return a one-line size/lines summary for a resource file.
-
-    Schema sketches were tried earlier but produced output that was
-    structurally complete and semantically empty (e.g. "{key: str, ...}"
-    tells you nothing about which models are configured). A simple
-    "exists, this big, this many lines" is more honest — it tells the
-    reader the file's there and how much it weighs, without pretending
-    to summarise content that genuinely needs to be read in full.
-    """
+    """Return a one-line size/lines summary for a resource file."""
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -373,7 +471,12 @@ def summarise_resource(path: str) -> str:
 
 
 def collect_resource_files(root: str) -> list[tuple[str, str]]:
-    """Return [(path, summary), ...] for every resource file under MAP_INCLUDE_DIRS."""
+    """Return [(path, summary), ...] for every resource file under MAP_INCLUDE_DIRS.
+
+    Does NOT apply .gitignore — large data files and external corpora are often
+    gitignored because of their size or origin, but their schema is still useful
+    context in the map.
+    """
     results: list[tuple[str, str]] = []
     for sub in MAP_INCLUDE_DIRS:
         full_dir = os.path.join(root, sub)
@@ -395,31 +498,6 @@ def collect_resource_files(root: str) -> list[tuple[str, str]]:
 def _module_group(rel_path: str) -> str:
     """Pick the grouping key for the project map — the file's containing directory."""
     return os.path.dirname(rel_path) or '.'
-
-
-def generate_tree_header(root: str) -> str:
-    """Run scripts/tree.py against root and return its stdout, or '' on failure.
-
-    Uses a subprocess rather than importing tree.py so the two tools stay
-    loosely coupled — tree.py changes (PRUNE_CONTENTS_DIRS, EXCLUDE_DIRS)
-    take effect immediately without tarzan needing edits.
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    tree_path = os.path.join(here, 'tree.py')
-    if not os.path.isfile(tree_path):
-        return ''
-
-    try:
-        result = subprocess.run(
-            [sys.executable, tree_path, root],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        return result.stdout
-    except (subprocess.SubprocessError, OSError):
-        return ''
 
 
 def render_file_section(path: str) -> list[str]:
@@ -444,8 +522,6 @@ def render_file_section(path: str) -> list[str]:
     out: list[str] = [f"### {fname}", '']
 
     if docstring_body:
-        # Wrap in a code block so alignment / indentation survive any
-        # markdown renderer that might otherwise reflow whitespace.
         out.append('```')
         out.append(docstring_body)
         out.append('```')
@@ -467,10 +543,10 @@ def render_file_section(path: str) -> list[str]:
 
 def render_map(root: str, extra_exclude: set) -> str:
     """Build the structured Markdown map covering Python files + resource summaries."""
-    paths = collect_python_files(root, extra_exclude)
+    paths     = collect_python_files(root, extra_exclude)
     resources = collect_resource_files(root)
 
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M')
+    ts      = datetime.now().strftime('%Y-%m-%d %H:%M')
     project = os.path.basename(os.path.abspath(root)) or 'project'
 
     out: list[str] = [
@@ -479,10 +555,8 @@ def render_map(root: str, extra_exclude: set) -> str:
         '',
     ]
 
-    # Project-tree header — shows the shape of the codebase before any
-    # per-file detail. Uses scripts/tree.py via subprocess so noisy
-    # directories (logs, scans) appear as elided leaves.
-    tree_text = generate_tree_header(root)
+    # Project tree — present in both snapshot and map mode.
+    tree_text = generate_tree(root)
     if tree_text:
         out.append("## Project Tree")
         out.append('')
@@ -551,7 +625,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    extra = set(args.exclude or [])
+    extra    = set(args.exclude or [])
     abs_root = os.path.abspath(args.root)
 
     if args.map:

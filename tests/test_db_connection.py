@@ -18,8 +18,8 @@ Environment variables required:
 from __future__ import annotations
 
 import os
-import sys
 import subprocess
+import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -35,7 +35,9 @@ def _mysql_query(sql: str) -> str:
     result = subprocess.run(
         ["mysql", f"-h{host}", f"-u{user}", f"-p{passwd}", name,
          "--skip-column-names", "-e", sql],
-        capture_output=True, text=True
+        capture_output=True,
+        text=True,
+        check=False,   # non-zero return handled by returncode check below
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip())
@@ -43,17 +45,21 @@ def _mysql_query(sql: str) -> str:
 
 
 class TestDatabaseConnection(unittest.TestCase):
+    """Smoke tests confirming the database is reachable and minimally populated."""
 
     def test_can_connect(self):
+        """Verify a basic SELECT 1 reaches the database without error."""
         try:
             _mysql_query("SELECT 1")
         except Exception as e:
             self.fail(f"Database connection failed: {e}")
 
     def test_products_table_exists(self):
+        """Verify the products table exists and contains at least one row."""
         count = _mysql_query("SELECT COUNT(*) FROM products")
         self.assertGreater(int(count), 0, "products table is empty or missing")
 
     def test_gtin_column_exists(self):
+        """Verify the gtin column is present and non-empty."""
         result = _mysql_query("SELECT gtin FROM products LIMIT 1")
         self.assertTrue(result, "gtin column missing or empty")

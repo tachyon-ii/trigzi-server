@@ -20,6 +20,11 @@ Run fast (unit only):
 =============================================================================
 """
 
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# Test class names and method names ARE the docstrings for this module —
+# enforcing prose docstrings on every test method produces noise with no
+# signal. The module-level docstring above covers purpose and structure.
+
 from __future__ import annotations
 
 import os
@@ -29,6 +34,8 @@ import logging
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+from core.analyser import analyse_menu  # hoisted: eliminates import-outside-toplevel
 
 logging.disable(logging.CRITICAL)
 
@@ -75,6 +82,7 @@ MOCK_INVALID_RESPONSE = {
 # ---------------------------------------------------------------------------
 
 class TestFixture(unittest.TestCase):
+    """Verify the test fixture file is present and non-trivially sized."""
 
     def test_fixture_file_exists(self):
         self.assertTrue(FIXTURE_PATH.exists(), f"Fixture missing: {FIXTURE_PATH}")
@@ -89,9 +97,9 @@ class TestFixture(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestAnalyseMenuUnit(unittest.IsolatedAsyncioTestCase):
+    """Unit tests for analyse_menu — all LLM calls mocked, fast and CI-safe."""
 
     async def test_returns_dict_on_valid_response(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_MENU_RESPONSE
             result = await analyse_menu(text=SEZAR_MENU)
@@ -99,21 +107,18 @@ class TestAnalyseMenuUnit(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, dict)
 
     async def test_result_has_type_field(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_MENU_RESPONSE
             result = await analyse_menu(text=SEZAR_MENU)
         self.assertIn("type", result)
 
     async def test_result_type_is_menu(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_MENU_RESPONSE
             result = await analyse_menu(text=SEZAR_MENU)
         self.assertEqual(result["type"], "menu")
 
     async def test_result_has_items_list(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_MENU_RESPONSE
             result = await analyse_menu(text=SEZAR_MENU)
@@ -121,14 +126,12 @@ class TestAnalyseMenuUnit(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result["items"], list)
 
     async def test_items_not_empty(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_MENU_RESPONSE
             result = await analyse_menu(text=SEZAR_MENU)
         self.assertGreater(len(result["items"]), 0)
 
     async def test_each_item_has_name(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_MENU_RESPONSE
             result = await analyse_menu(text=SEZAR_MENU)
@@ -137,7 +140,6 @@ class TestAnalyseMenuUnit(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(item["name"].strip())
 
     async def test_each_item_has_listed_ingredients(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_MENU_RESPONSE
             result = await analyse_menu(text=SEZAR_MENU)
@@ -146,7 +148,6 @@ class TestAnalyseMenuUnit(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(item["listed_ingredients"], list)
 
     async def test_each_item_has_suspected_ingredients(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_MENU_RESPONSE
             result = await analyse_menu(text=SEZAR_MENU)
@@ -155,25 +156,28 @@ class TestAnalyseMenuUnit(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(item["suspected_ingredients"], list)
 
     async def test_returns_none_on_invalid_input(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.return_value = MOCK_INVALID_RESPONSE
             result = await analyse_menu(text="not a menu")
         self.assertIsNone(result)
 
+    # pylint: disable=duplicate-code
+    # This early-exit + assert_not_called pattern is necessarily identical to
+    # the equivalent tests in test_analyser.py — both verify the same contract
+    # on the same function signature. A shared helper would couple the two
+    # modules without improving clarity.
     async def test_returns_none_on_empty_text(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             result = await analyse_menu(text="")
         self.assertIsNone(result)
         mock.assert_not_called()
 
     async def test_returns_none_on_router_exception(self):
-        from core.analyser import analyse_menu
         with patch("core.analyser.router.analyse", new_callable=AsyncMock) as mock:
             mock.side_effect = Exception("Router failed")
             result = await analyse_menu(text=SEZAR_MENU)
         self.assertIsNone(result)
+    # pylint: enable=duplicate-code
 
 
 # ---------------------------------------------------------------------------
@@ -183,9 +187,10 @@ class TestAnalyseMenuUnit(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 class TestAnalyseMenuIntegration(unittest.IsolatedAsyncioTestCase):
+    """Integration tests against the real LLM — slower, not CI-safe."""
 
     async def asyncSetUp(self):
-        from core.analyser import analyse_menu
+        """Run analyse_menu once; share result across all tests in this class."""
         self.result = await analyse_menu(text=SEZAR_MENU)
         self.assertIsNotNone(self.result, "analyse_menu returned None — LLM or parse failure")
         self.items = self.result["items"]
@@ -257,7 +262,6 @@ class TestAnalyseMenuIntegration(unittest.IsolatedAsyncioTestCase):
         We only flag method+protein combinations where the method adds no
         information beyond how the protein was cooked.
         """
-        # Only flag method + bare protein combinations
         base_proteins = ["chicken", "lamb", "beef", "fish", "crab", "pork", "salmon"]
         methods = ["grilled", "braised", "slow-roasted", "smoked", "fried",
                    "baked", "steamed", "poached", "charred"]
@@ -294,7 +298,6 @@ class TestAnalyseMenuIntegration(unittest.IsolatedAsyncioTestCase):
         KATAIFI WRAPPED LAMB | sesame aioli -> listed must include 'lamb'.
         Rule 6 in the prompt: dish name implies the primary ingredient.
         """
-        # Map dish name fragment -> expected ingredient in listed
         cases = {
             "oyster":   "oysters",
             "kataifi":  "lamb",
@@ -304,7 +307,7 @@ class TestAnalyseMenuIntegration(unittest.IsolatedAsyncioTestCase):
         for fragment, expected in cases.items():
             item = self._find(fragment)
             if item is None:
-                continue  # dish not in this run's results, skip
+                continue
             listed_lower = [i.lower() for i in item["listed_ingredients"]]
             self.assertTrue(
                 any(expected in i for i in listed_lower),
@@ -317,26 +320,23 @@ class TestAnalyseMenuIntegration(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 class TestAnalyseMenuEdgeCases(unittest.IsolatedAsyncioTestCase):
+    """Edge-case inputs that must return None — real LLM, slower."""
 
     async def test_non_menu_text_returns_none(self):
-        from core.analyser import analyse_menu
         result = await analyse_menu(
             text="The quick brown fox jumps over the lazy dog."
         )
         self.assertIsNone(result)
 
     async def test_empty_text_returns_none(self):
-        from core.analyser import analyse_menu
         result = await analyse_menu(text="")
         self.assertIsNone(result)
 
     async def test_numeric_only_returns_none(self):
-        from core.analyser import analyse_menu
         result = await analyse_menu(text="42 18 17 18 16 27 24 30 25 27")
         self.assertIsNone(result)
 
     async def test_novel_text_returns_none(self):
-        from core.analyser import analyse_menu
         result = await analyse_menu(
             text=(
                 "Call me Ishmael. Some years ago never mind how long precisely "
