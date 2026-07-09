@@ -67,7 +67,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 # ─── Snapshot-mode policy ────────────────────────────────────────────────────
 
-INCLUDE_EXTENSIONS = {'.py', '.md', '.txt', '.json'}
+INCLUDE_EXTENSIONS = {'.py', '.md', '.txt', '.json', '.html'}
 
 EXCLUDE_DIRS = {
     'venv', '.venv', 'env', '.env',

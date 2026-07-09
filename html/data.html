@@ -4,50 +4,48 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Data Policy - Trigzi</title>
-    
-    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/trigzi.css">
 </head>
 <body>
-
-    <header class="hero">
-        <a href="index.html">
-            <img src="images/trigzi_icon.svg" alt="Trigzi Logo" class="logo">
+	<header class="top-nav">
+        <a href="index.html" class="back-link">
+            <span class="chevron">&#8249;</span> Back
         </a>
-        <h1 class="trigzi">Data Policy</h1>
+        <a href="index.html">
+            <img src="images/trigzi_icon_white.svg" alt="Trigzi Logo" class="logo">
+        </a>
     </header>
-
     <main>
-        <section class="content-container">
-            <div class="content-box">
-                <a href="index.html" class="back-link">&larr; Back to Home</a>
-<p><strong>Effective Date:</strong> 17th March 2026</p>
+        <h1 class="page-title">Data Policy</h1>
+        <p style="color: var(--text-muted);"><strong>Effective Date:</strong> 17th March 2026</p>
 
-<h2>Your Data, Your Device</h2>
-<p>Trigzi is designed to empower you with data, not harvest it from you. Your personal health data, daily habits, and symptom logs live exactly where they belong: securely on your own hardware. By design, the "Nuclear Option" in your Profile settings will instantly and permanently erase all scans, photos, and notes from your physical device.</p>
+        <h2>Your Data, Your Device</h2>
+        <p>Trigzi is designed to empower you with data, not harvest it from you. Your personal health data, daily habits, and symptom logs live exactly where they belong: securely on your own hardware. By design, the "Nuclear Option" in your Profile settings will instantly and permanently erase all scans, photos, and notes from your physical device.</p>
 
-<h2>Image Processing & Camera</h2>
-<p>When utilizing the camera for meal tracking or Optical Character Recognition (OCR) to read ingredient labels, all processing occurs locally on your device using native systems (such as Apple's Vision framework). Your photos and camera feeds are never uploaded to our servers, analyzed in the cloud, or used to train external AI models.</p>
+        <h2>Image Processing & Camera</h2>
+        <p>When utilizing the camera for meal tracking or Optical Character Recognition (OCR) to read ingredient labels, all processing occurs locally on your device using native systems (such as Apple's Vision framework). Your photos and camera feeds are never uploaded to our servers, analyzed in the cloud, or used to train external AI models.</p>
 
-<h2>Database Normalization & Search</h2>
-<p>To make logging fast and accurate, our backend systems cache public product data—such as ingredients, macronutrients, and known allergens. When you scan a barcode or search for an item, that request is completely anonymized. We store the resulting product information to improve scanning speeds for all users, but this data is strictly product-related and contains zero user telemetry or tracking identifiers.</p>
+        <h2>Database Normalization & Search</h2>
+        <p>To make logging fast and accurate, our backend systems cache public product data—such as ingredients, macronutrients, and known allergens. When you scan a barcode or search for an item, that request is completely anonymized. We store the resulting product information to improve scanning speeds for all users, but this data is strictly product-related and contains zero user telemetry or tracking identifiers.</p>
 
-<h2>Zero Data Selling Policy</h2>
-<p>We have a strict zero-monetization policy regarding your personal information. We do not sell, rent, broker, or trade your habits, dietary preferences, or health triggers to data brokers, advertising networks, or third-party corporations.</p>
+        <h2>Zero Data Selling Policy</h2>
+        <p>We have a strict zero-monetization policy regarding your personal information. We do not sell, rent, broker, or trade your habits, dietary preferences, or health triggers to data brokers, advertising networks, or third-party corporations.</p>
 
-<h2>Backups and Syncing</h2>
-<p>Because Trigzi is local-first, the only time your personal data leaves your device is if you have explicitly enabled system-level cloud backups (such as iCloud or Google One). These backups are encrypted and governed entirely by your platform provider. Trigzi does not have back-door access to your cloud storage.</p>
+        <h2>Backups and Syncing</h2>
+        <p>Because Trigzi is local-first, the only time your personal data leaves your device is if you have explicitly enabled system-level cloud backups (such as iCloud or Google One). These backups are encrypted and governed entirely by your platform provider. Trigzi does not have back-door access to your cloud storage.</p>
 
-<h2>Anonymous Crash Reporting</h2>
-<p>We only see what you explicitly choose to share. If the app encounters a bug or crashes, your operating system may ask if you want to share an anonymous crash report with our developers. This is entirely opt-in, helps us keep the app stable, and contains no personal health data or trigger logs.</p>
+        <h2>Anonymous Crash Reporting</h2>
+        <p>We only see what you explicitly choose to share. If the app encounters a bug or crashes, your operating system may ask if you want to share an anonymous crash report with our developers. This is entirely opt-in, helps us keep the app stable, and contains no personal health data or trigger logs.</p>
 
-<h2>Contact Us</h2>
-<p>If you have any questions about how your data is handled, or if you need to exercise your data rights, please reach out to us at <a href="mailto:privacy@trigzi.com">privacy@trigzi.com</a>.</p>
-            </div>
-        </section>
+        <h2>Contact Us</h2>
+        <p>If you have any questions about how your data is handled, or if you need to exercise your data rights, please reach out to us at <a href="mailto:privacy@trigzi.com">privacy@trigzi.com</a>.</p>
     </main>
 
     <footer>
+        <hr class="footer-divider">
         <nav>
             <a href="data.html">Data</a>
             <a href="privacy.html">Privacy</a>

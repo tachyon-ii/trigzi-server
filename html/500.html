@@ -4,126 +4,159 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>500 Internal Error - Trigzi</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700;900&display=swap" rel="stylesheet">
 <style>
-  html, body {
-    background: #f3f9f5;
-    font-family: 'Montserrat', sans-serif;
-    margin: 0;
-    height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-  }
+html, body {
+  background: #000000;
+  font-family: 'Montserrat', -apple-system, sans-serif;
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: #f5f5f5;
+}
 
-  .container {
-    text-align: center;
-    position: relative;
-    z-index: 10;
-    padding: 2rem;
-  }
+.container {
+  text-align: center;
+  position: relative;
+  z-index: 10;
+  padding: 2rem;
+  max-width: 550px;
+  width: 100%;
+}
 
-  /* The Stress Rings */
-  .pulse-ring {
-    position: absolute;
-    top: 40%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    width: 200px;
-    height: 200px;
-    border: 3px solid #8b5cf6;
-    border-radius: 50%;
-    opacity: 0;
-    animation: pulse 2.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
-    z-index: -1;
-  }
+.barcode-wrapper {
+  height: 160px; 
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1.5rem;
+  overflow: visible;
+}
 
-  .pulse-ring.two {
-    animation-delay: 0.8s;
-    border-color: #50c878;
-  }
+.barcode {
+  display: flex;
+  align-items: flex-start;
+  gap: 3px;
+}
 
-  .pulse-ring.three {
-    animation-delay: 1.6s;
-    border-color: #8b5cf6;
-  }
+.bar {
+  background: #f5f5f5;
+  border-radius: 1px;
+  flex-shrink: 0;
+  will-change: transform, background-color; 
+}
 
-  .error-code {
-    font-size: 8rem;
-    font-weight: 900;
-    color: #8b5cf6;
-    margin: 0;
-    line-height: 1;
-    letter-spacing: -5px;
-    text-shadow: 4px 4px 0px rgba(80, 200, 120, 0.2);
-    animation: slight-jitter 4s infinite;
-  }
+.bar.falling {
+  animation: cascade 1s cubic-bezier(0.55, 0.085, 0.68, 0.53) forwards;
+  animation-delay: var(--delay);
+  transform-origin: bottom center;
+}
 
-  .message {
-    font-size: 2rem;
-    color: #333;
-    margin: 1.5rem 0 1rem;
-    font-weight: 700;
+@keyframes cascade {
+  0% { transform: translate(0, 0) rotate(0deg); background: #f5f5f5; }
+  15% { background: #EA4335; }
+  75% { 
+    transform: translate(var(--endX), var(--endY)) rotate(var(--rot)); 
+    background: #EA4335; 
+    animation-timing-function: ease-out;
   }
+  85% { 
+    transform: translate(calc(var(--endX) * 1.05), calc(var(--endY) - 8px)) rotate(calc(var(--rot) * 1.05)); 
+    background: #EA4335; 
+    animation-timing-function: ease-in;
+  }
+  100% { 
+    transform: translate(var(--endX), var(--endY)) rotate(var(--rot)); 
+    background: #EA4335; 
+  }
+}
 
-  .sub-message {
-    color: #666;
-    margin-bottom: 2.5rem;
-    max-width: 450px;
-    margin-left: auto;
-    margin-right: auto;
-    line-height: 1.6;
-    font-size: 1.1rem;
-  }
+.error-code {
+  font-size: 6.5rem;
+  font-weight: 900;
+  color: #EA4335; 
+  margin: 0;
+  line-height: 1;
+  letter-spacing: -3px;
+}
 
-  .btn {
-    display: inline-block;
-    background-color: #50c878;
-    color: #fff;
-    text-decoration: none;
-    padding: 16px 40px;
-    border-radius: 50px;
-    font-weight: bold;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    transition: all 0.3s ease;
-    box-shadow: 0 4px 15px rgba(80, 200, 120, 0.3);
-  }
+.message {
+  font-size: 1.75rem;
+  color: #f5f5f5;
+  margin: 1rem 0 0.5rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
 
-  .btn:hover {
-    background-color: #8b5cf6;
-    box-shadow: 0 4px 15px rgba(139, 92, 246, 0.4);
-    transform: translateY(-2px);
-  }
+.sub-message {
+  color: #a3a3a3;
+  margin-bottom: 2.5rem;
+  line-height: 1.6;
+  font-size: 1rem;
+}
 
-  /* Animations */
-  @keyframes pulse {
-    0% { transform: translate(-50%, -50%) scale(0.5); opacity: 0.8; }
-    100% { transform: translate(-50%, -50%) scale(3.5); opacity: 0; }
-  }
+.btn {
+  display: inline-block;
+  background-color: #EA4335; 
+  color: #fff;
+  text-decoration: none;
+  padding: 16px 40px;
+  border-radius: 50px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.5px;
+  transition: all 0.2s ease;
+}
 
-  @keyframes slight-jitter {
-    0%, 100% { transform: rotate(0deg); }
-    1% { transform: rotate(-2deg); }
-    2% { transform: rotate(2deg); }
-    3% { transform: rotate(0deg); }
-  }
+.btn:hover {
+  background-color: #d33828; 
+  transform: translateY(-2px);
+}
 </style>
 </head>
 <body>
 
-  <div class="pulse-ring"></div>
-  <div class="pulse-ring two"></div>
-  <div class="pulse-ring three"></div>
-
   <div class="container">
+    <div class="barcode-wrapper">
+      <div class="barcode" id="barcode"></div>
+    </div>
+
     <h1 class="error-code">500</h1>
-    <div class="message">Our servers hit a trigger.</div>
-    <div class="sub-message">Even our systems get a little overwhelmed sometimes. We've logged this symptom and our engineers are working on a remedy.</div>
+    <div class="message">Parsing Engine Failure</div>
+    <div class="sub-message">The sequence snapped. The system encountered an unrecoverable exception and the event has been logged to telemetry.</div>
     
     <a href="index.html" class="btn">Return to Safety</a>
   </div>
 
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const barcodeContainer = document.getElementById('barcode');
+        const barCount = 50; 
+        const barHeight = 80; 
+        let html = '';
+
+        for (let i = 0; i < barCount; i++) {
+            const width = Math.floor(Math.random() * 5) + 2;
+            const isStable = i < (barCount * 0.35);
+
+            if (isStable) {
+                html += `<div class="bar" style="width: ${width}px; height: ${barHeight}px;"></div>`;
+            } else {
+                const delay = ((barCount - 1 - i) * 0.05).toFixed(2);
+                const endX = ((Math.random() - 0.5) * 100).toFixed(1); 
+                const endY = (80 + Math.random() * 20).toFixed(1); 
+                const rot = ((Math.random() - 0.5) * 160).toFixed(1);
+
+                html += `<div class="bar falling" style="width: ${width}px; height: ${barHeight}px; --delay: ${delay}s; --endX: ${endX}px; --endY: ${endY}px; --rot: ${rot}deg;"></div>`;
+            }
+        }
+        
+        barcodeContainer.innerHTML = html;
+    });
+  </script>
 </body>
 </html>
