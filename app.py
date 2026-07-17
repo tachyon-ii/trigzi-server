@@ -423,6 +423,13 @@ async def messages_route():
     )
     return jsonify(messages), 200
 
+@app.route('/api/trigger-500', methods=['GET'])
+async def trigger_500_route():
+    """Deliberate failure endpoint to test Nginx 500 JSON error handling."""
+    logger.warning("Triggering intentional divide-by-zero error for testing.")
+    fail = 1 / 0
+    return jsonify({"status": "ok"}), 200
+
 if __name__ == '__main__':
     from hypercorn.config import Config
     from hypercorn.asyncio import serve

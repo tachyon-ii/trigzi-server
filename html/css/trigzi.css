@@ -1,218 +1,263 @@
-body {
-    font-family: 'Montserrat', Arial, sans-serif;
-    text-align: center;
-    color: #333;
-    background-color: #f3f9f5; /* Soft complementary green */
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    min-height: 100vh;
+:root {
+  /* Dark Mode Base Lighting */
+  --bg-color: #000000;         
+  --panel-bg: #181818;         
+  --border-color: #2e2e2e;     
+  
+  /* Typography */
+  --text-main: #f5f5f5;        
+  --text-muted: #a3a3a3;       
+  
+  /* Semantic Material Palette */
+  --brand-red: #EA4335;        
+  --brand-yellow: #FBBC04;     
+  --brand-green: #0F9D58;      
+  --brand-blue: #4285F4;       
 }
 
-.hero {
-    padding: 2rem 1rem 0rem;
-}
-
-.logo {
-    width: 80px; 
-    height: auto;
-    background: transparent;
-}
-
-.trigzi {
-    font-size: 4rem;
-    margin: 0.5rem 0 0.5rem;
-    color: #8b5cf6;
-}
-
-.tagline {
-    font-size: 2rem;
-    font-weight: normal;
-    color: #50c878;
-    margin-top: 0;
+/* =========================================
+   RESET & BASE TYPOGRAPHY
+   ========================================= */
+html, body {
+  font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--bg-color);
+  color: var(--text-main);
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 main {
-    flex: 1; /* Pushes footer to the bottom */
-    padding: 1rem;
+  flex: 1;
+  width: 100%;
+  max-width: 640px; 
+  margin: 0 auto;
+  padding: 0 1.5rem 2rem;
+  box-sizing: border-box;
 }
 
+h1, h2, h3 { 
+  color: var(--text-main); 
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+p { 
+  line-height: 1.7; 
+  margin-bottom: 1.25rem; 
+  font-size: 1rem;
+}
+
+a { 
+  color: var(--brand-green); 
+  text-decoration: none; 
+  font-weight: 600; 
+  transition: color 0.2s ease, text-decoration 0.2s ease; 
+}
+
+a:hover { 
+  color: var(--brand-yellow); 
+  text-decoration: none; 
+}
+
+/* =========================================
+   TOP NAV (Text Pages)
+   ========================================= */
+.top-nav {
+  position: relative;
+  display: flex;
+  justify-content: center; 
+  align-items: center;
+  padding: 1.5rem 1.5rem 0;
+  max-width: 640px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.top-nav .back-link {
+  position: absolute;
+  left: 1.5rem; 
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem; /* Tightened so the chevron sits closer to the text */
+  color: var(--text-muted);
+  font-size: 1rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  transition: color 0.2s ease;
+  margin: 0;
+}
+
+.top-nav .back-link:hover {
+  color: var(--text-main);
+}
+
+.chevron {
+  font-size: 1.8rem;
+  line-height: 0;
+  transform: translateY(-2px); /* Optical nudge to match Montserrat baseline */
+}
+
+.top-nav .logo {
+  width: 44px;
+  height: 44px;
+}
+
+.page-title {
+  color: var(--brand-green);
+  font-size: 2rem;
+  margin: 2rem 0 1.5rem;
+  letter-spacing: 0.5px;
+}
+
+/* =========================================
+   HERO SECTION (Index)
+   ========================================= */
+.hero {
+  text-align: center;
+  padding: 4rem 1rem 2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.hero .logo {
+  width: 120px;
+  height: 120px;
+  margin-bottom: 0.5rem;
+}
+
+.hero h1.trigzi {
+  color: var(--brand-green);
+  margin: 0;
+  font-size: 2.25rem;
+  letter-spacing: 0.5px;
+}
+
+.hero h2.tagline {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 400;
+  letter-spacing: 0.25px;
+  color: var(--text-muted);
+}
+
+/* =========================================
+   INDEX BENEFITS BOX
+   ========================================= */
 .benefits-container {
-    display: flex;
-    justify-content: center;
-    margin-bottom: 2rem;
+  max-width: 400px;
+  margin-left: auto;
+  margin-right: auto;
+  width: 100%;
 }
 
-/* White box styling */
 .benefits-box {
-    background-color: #ffffff;
-    border-radius: 16px;
-    padding: 2rem;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-    max-width: 400px;
-    width: 100%;
+  background: var(--panel-bg);
+  padding: 2.5rem;
+  border-radius: 16px;
+  border: 1px solid var(--border-color);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  margin-bottom: 2.5rem;
 }
 
 .ticks {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    text-align: left;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
 }
 
 .ticks li {
-    margin-bottom: 1rem;
-    font-size: 1.2rem;
-    display: flex;
-    align-items: flex-start;
-}
-
-.ticks li:last-child {
-    margin-bottom: 0;
+  padding-left: 2rem;
+  position: relative;
+  font-weight: 600;
+  font-size: 1.1rem;
+  line-height: 1.4;
+  color: var(--text-main);
 }
 
 .ticks li::before {
-    content: "✓";
-    color: #8b5cf6; /* Purple checkmark to match theme */
-    font-weight: bold;
-    margin-right: 12px;
+  content: '✓';
+  position: absolute;
+  left: 0;
+  top: -2px;
+  font-size: 1.2rem;
+  font-weight: 800;
 }
 
-/* App Store Icons */
+.ticks li:nth-child(1)::before { color: var(--brand-red); }
+.ticks li:nth-child(2)::before { color: var(--brand-yellow); }
+.ticks li:nth-child(3)::before { color: var(--brand-green); }
+
+/* =========================================
+   APP STORE BADGES
+   ========================================= */
 .store-links {
-    display: flex;
-    justify-content: center;
-    gap: 1rem;
-    margin-bottom: 3rem;
-    flex-wrap: wrap;
+  margin-top: 40px;
+  display: flex;
+  justify-content: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
 }
 
 .store-badge {
-    height: 48px; /* Standardize badge heights */
-    width: auto;
+  height: 48px;
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease;
+  opacity: 0.85;
 }
 
-/* Content */
-.content-container {
-    display: flex;
-    justify-content: center;
-    padding: 2rem 1rem; /* Keeps it off the screen edges on mobile */
+.store-badge:hover {
+  transform: translateY(-3px);
+  opacity: 1;
 }
 
-.content-box {
-    background-color: #ffffff; /* White box */
-    max-width: 800px; /* Constrains the width */
-    width: 100%;
-    border-radius: 16px;
-    padding: 3rem;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-    text-align: left;
-    line-height: 1.6;
-}
-
-.content-box h2 {
-    color: #8b5cf6;
-    margin-top: 2rem;
-}
-
-.content-box h2:first-child {
-    margin-top: 0;
-}
-
-.content-box a {
-    color: #8b5cf6; /* Primary purple */
-    text-decoration: none;
-    font-weight: 600;
-    transition: color 0.2s ease;
-}
-
-.content-box a:hover {
-    color: #50c878; /* Tagline emerald on hover */
-    text-decoration: underline; /* Optional: adds a nice UX touch for inline links */
-}
-
-.back-link {
-    display: inline-block;
-    margin-bottom: 2rem;
-    padding: 0.6rem 1.2rem;
-    background-color: #f3f9f5; /* Soft background */
-    color: #8b5cf6 !important; /* Forces purple, kills the default blue */
-    text-decoration: none !important; /* Kills the default underline */
-    font-weight: 700;
-    font-size: 1rem; /* Larger, more readable size */
-    border-radius: 25px; /* Pill shape */
-    transition: all 0.2s ease;
-}
-
-.back-link:hover {
-    background-color: #8b5cf6;
-    color: #ffffff !important;
-}
-
-/* Footer & Divider */
+/* =========================================
+   FOOTER
+   ========================================= */
 footer {
-    background-color: #8b5cf6;
-    padding: 3rem 1rem;
-    margin-top: auto; 
-    text-align: center;
-    width: 100%;
-    box-sizing: border-box;
+  text-align: center;
+  padding: 2rem 0;
+  margin-top: auto;
+  width: 100%;
 }
 
 .footer-divider {
-    display: none; 
+  border: 0;
+  height: 1px;
+  background: var(--border-color);
+  margin: 0 auto 1.5rem;
+  max-width: 300px;
 }
 
 footer nav {
-    margin-bottom: 1.5rem;
+  display: flex;
+  justify-content: center;
+  gap: 2rem;
+  margin-bottom: 1.5rem;
 }
 
 footer nav a {
-    margin: 0 1.5rem;
-    color: #ffffff;
-    text-decoration: none;
-    font-size: 1rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 1px;
+  color: var(--text-main);
+  font-size: 0.9rem;
+  font-weight: 500;
 }
 
 footer nav a:hover {
-    color: #f3f8f5; /* Hover matches the main background */
-    text-decoration: underline;
+  color: var(--brand-yellow);
 }
 
 .copyright {
-    color: #e8f5ed;
-    font-size: 1rem;
-    margin: 0;
-}
-
-@media (max-width: 768px) {
-    .logo {
-        width: 60px; /* Reduced from 80px */
-    }
-
-    .trigzi {
-        font-size: 2.5rem; /* Reduced from 4rem */
-    }
-
-    .back-link {
-        display: block;
-        width: max-content;
-    }
-
-    .content-container {
-        padding: 0; /* Removes outer margin/padding */
-    }
-
-    .content-box {
-        box-shadow: none; /* Optional: removes shadow since it's edge-to-edge */
-        padding: 2rem 1.5rem; /* Keeps text from touching the screen edge */
-    }
-
-	.store-links {
-        margin-bottom: 1.5rem; /* Reduced from 3rem */
-    }
+  font-size: 0.8rem;
+  color: #555555;
+  margin: 0;
 }

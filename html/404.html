@@ -4,76 +4,71 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>404 Not Found - Trigzi</title>
-<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
-<script src="https://code.jquery.com/jquery-3.7.1.min.js" integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=" crossorigin="anonymous"></script>
-
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
 html, body {
-  background: #f3f9f5; /* Trigzi Background */
-  font-family: 'Montserrat', sans-serif;
+  background: #000000; 
+  font-family: 'Montserrat', -apple-system, sans-serif;
   margin: 0;
   padding: 0;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #f5f5f5;
+  overflow: hidden;
 }
 
-* {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 .box {
-  width: 350px;
-  height: 100%;
-  max-height: 600px;
-  min-height: 450px;
-  background: #8b5cf6; /* Trigzi Purple */
-  border-radius: 20px;
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  padding: 30px 50px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+  width: 100%;
+  max-width: 400px;
+  height: 400px;
+  position: relative;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .box__ghost {
-  padding: 15px 25px 25px;
   position: absolute;
-  left: 50%;
   top: 30%;
-  transform: translate(-50%, -30%);
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 120px;
 }
 
-.symbol:nth-child(1) { opacity: .2; animation: shine 4s ease-in-out 3s infinite; }
-.symbol:nth-child(1):before, .symbol:nth-child(1):after { content: ''; width: 12px; height: 4px; background: #fff; position: absolute; border-radius: 5px; bottom: 65px; left: 0; }
+.symbol:nth-child(1) { opacity: .15; animation: shine 4s ease-in-out 3s infinite; }
+.symbol:nth-child(1):before, .symbol:nth-child(1):after { content: ''; width: 12px; height: 4px; background: #4285F4; position: absolute; border-radius: 5px; bottom: 65px; left: -20px; }
 .symbol:nth-child(1):before { transform: rotate(45deg); }
 .symbol:nth-child(1):after { transform: rotate(-45deg); }
 
-.symbol:nth-child(2) { position: absolute; left: -5px; top: 30px; height: 18px; width: 18px; border: 4px solid; border-radius: 50%; border-color: #fff; opacity: .2; animation: shine 4s ease-in-out 1.3s infinite; }
+.symbol:nth-child(2) { position: absolute; left: -25px; top: 10px; height: 18px; width: 18px; border: 4px solid #4285F4; border-radius: 50%; opacity: .15; animation: shine 4s ease-in-out 1.3s infinite; }
 
-.symbol:nth-child(3) { opacity: .2; animation: shine 3s ease-in-out .5s infinite; }
-.symbol:nth-child(3):before, .symbol:nth-child(3):after { content: ''; width: 12px; height: 4px; background: #fff; position: absolute; border-radius: 5px; top: 5px; left: 40px; }
+.symbol:nth-child(3) { opacity: .15; animation: shine 3s ease-in-out .5s infinite; }
+.symbol:nth-child(3):before, .symbol:nth-child(3):after { content: ''; width: 12px; height: 4px; background: #4285F4; position: absolute; border-radius: 5px; top: -15px; left: 40px; }
 .symbol:nth-child(3):before { transform: rotate(90deg); }
 .symbol:nth-child(3):after { transform: rotate(180deg); }
 
-.symbol:nth-child(4) { opacity: .2; animation: shine 6s ease-in-out 1.6s infinite; }
-.symbol:nth-child(4):before, .symbol:nth-child(4):after { content: ''; width: 15px; height: 4px; background: #fff; position: absolute; border-radius: 5px; top: 10px; right: 30px; }
+.symbol:nth-child(4) { opacity: .15; animation: shine 6s ease-in-out 1.6s infinite; }
+.symbol:nth-child(4):before, .symbol:nth-child(4):after { content: ''; width: 15px; height: 4px; background: #4285F4; position: absolute; border-radius: 5px; top: 10px; right: -10px; }
 .symbol:nth-child(4):before { transform: rotate(45deg); }
 .symbol:nth-child(4):after { transform: rotate(-45deg); }
 
-.symbol:nth-child(5) { position: absolute; right: 5px; top: 40px; height: 12px; width: 12px; border: 3px solid; border-radius: 50%; border-color: #fff; opacity: .2; animation: shine 1.7s ease-in-out 7s infinite; }
-
-.symbol:nth-child(6) { opacity: .2; animation: shine 2s ease-in-out 6s infinite; }
-.symbol:nth-child(6):before, .symbol:nth-child(6):after { content: ''; width: 15px; height: 4px; background: #fff; position: absolute; border-radius: 5px; bottom: 65px; right: -5px; }
-.symbol:nth-child(6):before { transform: rotate(90deg); }
-.symbol:nth-child(6):after { transform: rotate(180deg); }
+.symbol:nth-child(5) { position: absolute; right: -20px; top: 50px; height: 12px; width: 12px; border: 3px solid #4285F4; border-radius: 50%; opacity: .15; animation: shine 1.7s ease-in-out 7s infinite; }
 
 .box__ghost-container {
-  background: #fff;
+  background: #f5f5f5; 
   width: 100px;
   height: 100px;
   border-radius: 100px 100px 0 0;
   position: relative;
   margin: 0 auto;
   animation: upndown 3s ease-in-out infinite;
+  box-shadow: 0 0 20px rgba(66, 133, 244, 0.2); 
 }
 
 .box__ghost-eyes {
@@ -81,17 +76,17 @@ html, body {
   left: 50%;
   top: 45%;
   height: 12px;
-  width: 70px;
-  transform: translate(-50%, -100%); /* Neutral center on load */
-  transition: transform 0.15s ease-out; /* Smooth catch-up to the mouse */
+  width: 60px;
+  transform: translate(-50%, 0);
+  transition: transform 0.1s ease-out; 
 }
 
 .box__eye-left, .box__eye-right {
-  width: 12px;
-  height: 12px;
-  background: #000; /* Reverted to black */
+  width: 14px;
+  height: 14px;
+  background: #121212;
   border-radius: 50%;
-  margin: 0 10px;
+  margin: 0 8px;
   position: absolute;
 }
 
@@ -112,109 +107,81 @@ html, body {
   top: -10px;
   height: 20px;
   border-radius: 100%;
-  background-color: #fff;
+  background-color: #f5f5f5;
 }
 
+/* Match the pure black background */
 .box__ghost-bottom div:nth-child(2n) {
   top: -12px;
-  margin: 0 -0px;
-  border-top: 15px solid #8b5cf6; /* Matches box background */
+  margin: 0;
+  border-top: 15px solid #000000; 
   background: transparent;
 }
 
 .box__ghost-shadow {
-  height: 20px;
-  box-shadow: 0 50px 15px 5px rgba(80, 40, 150, 0.4); /* Dark purple shadow */
+  height: 15px;
+  box-shadow: 0 40px 20px 5px rgba(66, 133, 244, 0.3); 
   border-radius: 50%;
   margin: 0 auto;
   animation: smallnbig 3s ease-in-out infinite;
 }
 
 .box__description {
-  position: absolute;
-  bottom: 30px;
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.box__description-container {
-  color: #fff;
   text-align: center;
-  width: 200px;
-  font-size: 16px;
-  margin: 0 auto;
+  width: 100%;
+  z-index: 10;
 }
 
 .box__description-title {
-  font-size: 24px;
-  letter-spacing: .5px;
-  font-weight: bold;
+  font-size: 1.8rem;
+  letter-spacing: 0.5px;
+  font-weight: 700;
+  color: #4285F4; 
+  margin-bottom: 0.5rem;
 }
 
 .box__description-text {
-  line-height: 20px;
-  margin-top: 20px;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: #a3a3a3;
+  margin-bottom: 2rem;
 }
 
-.box__button {
-  display: block;
-  position: relative;
-  background: #50c878; /* Trigzi Emerald */
-  border: 1px solid transparent;
+.btn {
+  display: inline-block;
+  background: #4285F4; 
   border-radius: 50px;
-  height: 50px;
+  height: 48px;
   text-align: center;
   text-decoration: none;
   color: #fff;
-  line-height: 50px;
-  font-size: 16px;
-  font-weight: bold;
-  padding: 0 70px;
-  white-space: nowrap;
-  margin-top: 25px;
-  transition: background .5s ease;
-  overflow: hidden;
-  -webkit-mask-image: -webkit-radial-gradient(white, black);
+  line-height: 48px;
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0 40px;
+  transition: background 0.2s ease, transform 0.2s ease;
 }
 
-.box__button:before {
-  content: '';
-  position: absolute;
-  width: 20px;
-  height: 100px;
-  background: #fff;
-  bottom: -25px;
-  left: 0;
-  border: 2px solid #fff;
-  transform: translateX(-50px) rotate(45deg);
-  transition: transform .5s ease;
+.btn:hover {
+  background: #2a6bdc;
+  transform: translateY(-2px);
 }
 
-.box__button:hover {
-  background: transparent;
-  border-color: #fff;
-}
-
-.box__button:hover:before {
-  transform: translateX(250px) rotate(45deg);
-}
-
-/* Animations */
 @keyframes upndown {
   0% {transform: translateY(5px);}
   50% {transform: translateY(15px);}
   100% {transform: translateY(5px);}
 }
 @keyframes smallnbig {
-  0% {width: 90px;}
-  50% {width: 100px;}
-  100% {width: 90px;}
+  0% {width: 70px;}
+  50% {width: 85px;}
+  100% {width: 70px;}
 }
 @keyframes shine {
-  0% {opacity: .2;}
-  25% {opacity: .1;}
-  50% {opacity: .2;}
-  100% {opacity: .2;}
+  0% {opacity: .15;}
+  25% {opacity: .05;}
+  50% {opacity: .15;}
+  100% {opacity: .15;}
 }
 </style>
 </head>
@@ -222,7 +189,6 @@ html, body {
 
 <div class="box">
   <div class="box__ghost">
-    <div class="symbol"></div>
     <div class="symbol"></div>
     <div class="symbol"></div>
     <div class="symbol"></div>
@@ -246,30 +212,34 @@ html, body {
   </div>
   
   <div class="box__description">
-    <div class="box__description-container">
-      <div class="box__description-title">Whoops!</div>
-      <div class="box__description-text">It seems like we couldn't find the page you were looking for</div>
-    </div>
-    
-    <a href="index.html" class="box__button">Go back</a>
-    
+    <div class="box__description-title">404 Error</div>
+    <div class="box__description-text">The coordinates you requested lead to empty space.</div>
+    <a href="index.html" class="btn">Return to Safety</a>
   </div>
 </div>
 
 <script>
-// Mouse tracking for ghost eyes
-var pageX = $(document).width();
-var pageY = $(document).height();
-var mouseY=0;
-var mouseX=0;
+document.addEventListener('DOMContentLoaded', () => {
+    const eyes = document.querySelector('.box__ghost-eyes');
+    if (!eyes) return;
+    let ticking = false;
 
-$(document).mousemove(function( event ) {
-  mouseY = event.pageY;
-  yAxis = (pageY-mouseY)/pageY*200; 
-  mouseX = event.pageX;
-  xAxis = (mouseX/pageX) * 100 - 100;
+    document.addEventListener('mousemove', (e) => {
+        if (!ticking) {
+            window.requestAnimationFrame(() => {
+                const pageX = window.innerWidth;
+                const pageY = window.innerHeight;
+                const xAxis = ((e.pageX / pageX) * 100) - 50; 
+                const yAxis = ((e.pageY / pageY) * 100) - 50; 
+                const moveX = (xAxis / 50) * 12; 
+                const moveY = (yAxis / 50) * 8;  
 
-  $('.box__ghost-eyes').css({ 'transform': 'translate('+ xAxis +'%,-'+ yAxis +'%)' }); 
+                eyes.style.transform = `translate(calc(-50% + ${moveX}px), ${moveY}px)`;
+                ticking = false;
+            });
+            ticking = true;
+        }
+    });
 });
 </script>
 

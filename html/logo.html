@@ -1,470 +1,378 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ring Logo · Colour Picker</title>
-<style>
-  :root {
-    --bg: #14161a;
-    --panel: #1d2027;
-    --panel-2: #252932;
-    --text: #e8eaed;
-    --muted: #9aa0aa;
-    --border: #333842;
-    --accent: #ea0043;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    background: var(--bg);
-    color: var(--text);
-    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    display: flex;
-    justify-content: center;
-    padding: 32px 20px;
-  }
-  .wrap {
-    width: 100%;
-    max-width: 940px;
-    display: grid;
-    grid-template-columns: minmax(280px, 1fr) 340px;
-    gap: 28px;
-    align-items: start;
-  }
-  @media (max-width: 760px) {
-    .wrap { grid-template-columns: 1fr; }
-  }
-
-  h1 {
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: .14em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin: 0 0 18px;
-  }
-
-  /* Canvas */
-  .stage {
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    overflow: hidden;
-    background:
-      conic-gradient(from 0deg, #2a2e36 0 25%, #23262d 0 50%, #2a2e36 0 75%, #23262d 0) 0 0/28px 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    aspect-ratio: 1;
-  }
-  #logoBg {
-    width: 100%;
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  #logoBg svg { width: 78%; height: 78%; }
-
-  /* Controls */
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 22px;
-  }
-  .row {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 11px 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .row:last-of-type { border-bottom: none; }
-
-  .swatch {
-    position: relative;
-    width: 42px;
-    height: 42px;
-    border-radius: 11px;
-    border: 1px solid rgba(255,255,255,.18);
-    overflow: hidden;
-    flex: 0 0 auto;
-    cursor: pointer;
-  }
-  .swatch input[type="color"] {
-    position: absolute;
-    inset: -8px;
-    width: calc(100% + 16px);
-    height: calc(100% + 16px);
-    border: none;
-    padding: 0;
-    cursor: pointer;
-    background: none;
-  }
-  .meta { flex: 1 1 auto; min-width: 0; }
-  .label {
-    font-size: 13.5px;
-    font-weight: 500;
-  }
-  .sub { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
-
-  .hex {
-    width: 88px;
-    flex: 0 0 auto;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    color: var(--text);
-    border-radius: 8px;
-    padding: 8px 9px;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 12.5px;
-    text-transform: uppercase;
-  }
-  .hex:focus { outline: none; border-color: var(--accent); }
-
-  .actions {
-    display: flex;
-    gap: 10px;
-    margin-top: 20px;
-  }
-
-  .presets {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    margin-top: 22px;
-  }
-  .preset {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 9px 11px;
-    cursor: pointer;
-    text-align: left;
-    transition: border-color .15s, background .15s;
-  }
-  .preset:hover { border-color: #555c68; background: #2e333d; }
-  .preset .dots { display: flex; gap: 3px; flex: 0 0 auto; }
-  .preset .dots span {
-    width: 12px; height: 12px; border-radius: 50%;
-    border: 1px solid rgba(255,255,255,.15);
-  }
-  .preset .pname { font-size: 12px; font-weight: 500; line-height: 1.1; }
-
-  /* Web-safe palette */
-  .websafe-section {
-    width: 100%;
-    max-width: 940px;
-    margin: 8px auto 0;
-    padding-top: 4px;
-  }
-  .ws-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
-    margin-bottom: 14px;
-  }
-  .target-chips { display: flex; gap: 7px; flex-wrap: wrap; }
-  .chip {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    color: var(--muted);
-    border-radius: 999px;
-    padding: 6px 12px 6px 9px;
-    font-size: 12px;
-    cursor: pointer;
-    transition: all .15s;
-  }
-  .chip .cdot { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(255,255,255,.2); }
-  .chip:hover { border-color: #555c68; }
-  .chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-
-  .ws-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
-    gap: 4px;
-    max-height: 420px;
-    overflow-y: auto;
-    padding: 4px;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    background: var(--panel);
-  }
-  .ws-cell {
-    height: 38px;
-    border-radius: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 9.5px;
-    letter-spacing: .02em;
-    cursor: pointer;
-    border: 1px solid rgba(0,0,0,.15);
-    transition: transform .08s;
-    user-select: none;
-  }
-  .ws-cell:hover { transform: scale(1.12); z-index: 2; box-shadow: 0 2px 8px rgba(0,0,0,.5); }
-  button {
-    flex: 1;
-    background: var(--panel-2);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    padding: 10px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background .15s, border-color .15s;
-  }
-  button:hover { background: #2e333d; border-color: #444a55; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.primary:hover { filter: brightness(1.08); }
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geometry & Ratio Explorer</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --panel-bg: #1e1e1e;
+            --text-main: #e0e0e0;
+            --text-muted: #9e9e9e;
+            --accent: #4caf50;
+            --accent-hover: #45a049;
+            --telemetry-bg: #0a0a0a;
+            --telemetry-border: #333;
+        }
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 1.5rem;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            max-width: 900px;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+        .panel {
+            background-color: var(--panel-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        .preview-container {
+            position: relative;
+            display: flex;
+            justify-content: center;
+            background-color: #000;
+            border-radius: 8px;
+            aspect-ratio: 1 / 1;
+            overflow: hidden;
+            max-height: 400px; 
+            margin: 0 auto; 
+        }
+        #svgPreview {
+            width: 100%;
+            height: 100%;
+        }
+        .icon-box {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            width: 64px;
+            height: 64px;
+            background-color: #000;
+            border: 1px solid #444;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: visible; 
+        }
+        .icon-box::before {
+            content: "64px";
+            position: absolute;
+            top: -18px;
+            right: 0;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-muted);
+            letter-spacing: 0.5px;
+        }
+        .controls-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.25rem;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .control-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+        input[type=range] {
+            width: 100%;
+            accent-color: var(--accent);
+        }
+        .telemetry-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            background-color: var(--telemetry-bg);
+            border: 1px solid var(--telemetry-border);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .metric {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+        .metric-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+        }
+        .metric-value {
+            font-size: 1.25rem;
+            font-weight: bold;
+            color: var(--accent);
+            font-family: "Courier New", Courier, monospace;
+        }
+        textarea {
+            width: 100%;
+            height: 120px;
+            background-color: #000;
+            color: var(--text-main);
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 1rem;
+            font-family: "Courier New", Courier, monospace;
+            font-size: 0.85rem;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 1rem;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            margin-top: 1rem;
+            width: 100%;
+        }
+        button:hover {
+            background-color: var(--accent-hover);
+        }
+        .invert-control {
+            grid-column: 1 / -1;
+            justify-content: flex-end;
+            align-items: flex-end;
+        }
+        #invertBtn {
+            margin-top: 0;
+            max-width: 180px;
+        }
+    </style>
 </head>
 <body>
-<div class="wrap">
-  <div>
-    <h1>Preview</h1>
-    <div class="stage">
-      <div id="logoBg">
-        <svg id="logo" viewBox="0 0 680 680" xmlns="http://www.w3.org/2000/svg">
-          <path id="ring-outer" d="M 381.7 103.6 A 240 240 0 1 1 185.7 156.1"
-                fill="none" stroke="#4c9077" stroke-width="32" stroke-linecap="round"/>
-          <path id="ring-middle" d="M 175.8 296.0 A 170 170 0 1 1 230.7 470.2"
-                fill="none" stroke="#ea0043" stroke-width="32" stroke-linecap="round"/>
-          <path id="ring-inner" d="M 287.5 430.9 A 105 105 0 1 1 420.4 407.5"
-                fill="none" stroke="#fdd40c" stroke-width="32" stroke-linecap="round"/>
-          <circle id="dot" cx="340" cy="340" r="36.7" fill="#4c9077"/>
-        </svg>
-      </div>
-    </div>
-  </div>
 
-  <div>
-    <h1>Colours</h1>
-    <div class="panel" id="panel"></div>
-    <div class="actions">
-      <button id="reset">Reset</button>
-      <button id="dlSvg">SVG</button>
-      <button id="dlPng" class="primary">PNG</button>
+<div class="container">
+    <div class="panel">
+        <div class="preview-container">
+            <div id="svgPreview"></div>
+            <div class="icon-box" id="iconPreview" title="64x64 Icon Scale"></div>
+        </div>
     </div>
 
-    <h1 style="margin:24px 0 12px;">Neon presets</h1>
-    <div class="presets" id="presets"></div>
-  </div>
-</div>
+    <div class="panel">
+        <div class="telemetry-grid">
+            <div class="metric">
+                <span class="metric-label">Radius Ratio (Outer/Inner)</span>
+                <span class="metric-value" id="metric-radius-ratio">0.00</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Outer Sweep (Deg)</span>
+                <span class="metric-value" id="metric-outer-sweep">0.0</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Inner Sweep (Deg)</span>
+                <span class="metric-value" id="metric-inner-sweep">0.0</span>
+            </div>
+        </div>
 
-<div class="websafe-section">
-  <div class="ws-head">
-    <h1 style="margin:0;">Web-safe palette · 216</h1>
-    <div class="target-chips" id="targetChips"></div>
-  </div>
-  <div class="ws-grid" id="wsGrid"></div>
+        <div class="controls-grid">
+            <div class="control-group">
+                <div class="control-header">
+                    <label>Stroke Width</label>
+                    <span id="val-strokeWidth">72</span>
+                </div>
+                <input type="range" id="strokeWidth" min="10" max="150" value="72">
+            </div>
+            <div class="control-group">
+                <div class="control-header">
+                    <label>Outer Radius</label>
+                    <span id="val-outerRadius">288</span>
+                </div>
+                <input type="range" id="outerRadius" min="100" max="450" value="288">
+            </div>
+            <div class="control-group">
+                <div class="control-header">
+                    <label>Inner Radius</label>
+                    <span id="val-innerRadius">144</span>
+                </div>
+                <input type="range" id="innerRadius" min="50" max="300" value="144">
+            </div>
+            <div class="control-group">
+                <div class="control-header">
+                    <label>Outer Gap Width (Deg)</label>
+                    <span id="val-outerGapWidth">72</span>
+                </div>
+                <input type="range" id="outerGapWidth" min="0" max="180" value="72">
+            </div>
+            <div class="control-group">
+                <div class="control-header">
+                    <label>Inner Gap Width (Deg)</label>
+                    <span id="val-innerGapWidth">72</span>
+                </div>
+                <input type="range" id="innerGapWidth" min="0" max="180" value="72">
+            </div>
+            <div class="control-group">
+                <div class="control-header">
+                    <label>Bottom Arc Spread</label>
+                    <span id="val-bottomArcSpread">0</span>
+                </div>
+                <input type="range" id="bottomArcSpread" min="-1" max="180" value="0">
+            </div>
+            <div class="control-group">
+                <div class="control-header">
+                    <label>Bottom Dot Radius</label>
+                    <span id="val-dotRadius">58</span>
+                </div>
+                <input type="range" id="dotRadius" min="0" max="100" value="58">
+            </div>
+            <div class="control-group invert-control">
+                <button id="invertBtn" type="button" onclick="toggleInvert()">Invert Colors</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <textarea id="svgOutput" readonly></textarea>
+        <button id="copyBtn" onclick="copyToClipboard()">Copy SVG</button>
+    </div>
 </div>
 
 <script>
-  const svg = document.getElementById('logo');
-  const bgEl = document.getElementById('logoBg');
+    const inputs = [
+        'strokeWidth', 
+        'outerRadius', 
+        'innerRadius', 
+        'outerGapWidth', 
+        'innerGapWidth', 
+        'bottomArcSpread',
+        'dotRadius'
+    ];
+    
+    let inverted = false;
 
-  // target | property | default | label | sublabel
-  const pickers = [
-    { key: 'bg',     el: bgEl,                          prop: 'background', def: 'transparent', label: 'Background', sub: 'Page behind logo' },
-    { key: 'outer',  el: svg.getElementById('ring-outer'),  prop: 'stroke', def: '#4c9077', label: 'Outer ring',  sub: '240r arc' },
-    { key: 'middle', el: svg.getElementById('ring-middle'), prop: 'stroke', def: '#ea0043', label: 'Middle ring', sub: '170r arc' },
-    { key: 'inner',  el: svg.getElementById('ring-inner'),  prop: 'stroke', def: '#fdd40c', label: 'Inner ring',  sub: '105r arc' },
-    { key: 'dot',    el: svg.getElementById('dot'),          prop: 'fill',   def: '#4c9077', label: 'Centre dot',  sub: 'Core' },
-  ];
+    inputs.forEach(id => {
+        document.getElementById(id).addEventListener('input', update);
+    });
 
-  const panel = document.getElementById('panel');
-  const norm = c => (c === 'transparent' ? '#1d2027' : c); // colour input can't show transparent
-
-  function apply(p, value) {
-    if (p.prop === 'background') {
-      p.el.style.background = value;
-    } else {
-      p.el.setAttribute(p.prop, value);
+    function describeArc(x, y, radius, startAngle, endAngle) {
+        const startRad = (startAngle * Math.PI) / 180;
+        const endRad = (endAngle * Math.PI) / 180;
+        
+        const startX = x + radius * Math.cos(startRad);
+        const startY = y + radius * Math.sin(startRad);
+        const endX = x + radius * Math.cos(endRad);
+        const endY = y + radius * Math.sin(endRad);
+        
+        let sweepAngle = endAngle - startAngle;
+        while (sweepAngle < 0) sweepAngle += 360;
+        
+        const largeArcFlag = sweepAngle > 180 ? "1" : "0";
+        return `M ${startX.toFixed(2)} ${startY.toFixed(2)} A ${radius} ${radius} 0 ${largeArcFlag} 1 ${endX.toFixed(2)} ${endY.toFixed(2)}`;
     }
-  }
 
-  // apply + sync that picker's UI controls
-  function setPicker(p, value) {
-    apply(p, value);
-    if (p._color) p._color.value = norm(value);
-    if (p._hex) p._hex.value = (value === 'transparent' ? 'NONE' : value.toUpperCase());
-  }
-  const byKey = k => pickers.find(p => p.key === k);
+    function update() {
+        const state = {};
+        inputs.forEach(id => {
+            const val = parseFloat(document.getElementById(id).value);
+            state[id] = val;
+            document.getElementById(`val-${id}`).innerText = val;
+        });
 
-  pickers.forEach(p => {
-    const row = document.createElement('div');
-    row.className = 'row';
-    row.innerHTML = `
-      <label class="swatch">
-        <input type="color" value="${norm(p.def)}">
-      </label>
-      <div class="meta">
-        <div class="label">${p.label}</div>
-        <div class="sub">${p.sub}</div>
-      </div>
-      <input class="hex" value="${p.def === 'transparent' ? 'NONE' : p.def.toUpperCase()}">
-    `;
-    panel.appendChild(row);
+        const bgColor = inverted ? "#FFFFFF" : "#000000";
+        const fgColor = inverted ? "#000000" : "#FFFFFF";
 
-    const color = row.querySelector('input[type="color"]');
-    const hex = row.querySelector('.hex');
+        const cx = 512;
+        const cy = 512;
+        const bottomAngle = 90; // 6 o'clock is 90 degrees in SVG Math.sin/cos
 
-    color.addEventListener('input', () => {
-      apply(p, color.value);
-      hex.value = color.value.toUpperCase();
-    });
-    hex.addEventListener('change', () => {
-      let v = hex.value.trim();
-      if (/^none$|^transparent$/i.test(v)) {
-        if (p.prop === 'background') { apply(p, 'transparent'); hex.value = 'NONE'; return; }
-        v = '#000000';
-      }
-      if (!v.startsWith('#')) v = '#' + v;
-      if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) {
-        apply(p, v);
-        color.value = v.length === 4 ? '#' + [...v.slice(1)].map(c => c + c).join('') : v;
-        hex.value = color.value.toUpperCase();
-      }
-    });
+        // Arc start and end points for Outer
+        const outerStartAngle = bottomAngle + state.outerGapWidth / 2;
+        const outerEndAngle = (bottomAngle - state.outerGapWidth / 2) + 360;
+        const outerSweep = outerEndAngle - outerStartAngle;
 
-    p._color = color; p._hex = hex;
-  });
+        // Arc start and end points for Inner
+        const innerStartAngle = bottomAngle + state.innerGapWidth / 2;
+        const innerEndAngle = (bottomAngle - state.innerGapWidth / 2) + 360;
+        const innerSweep = innerEndAngle - innerStartAngle;
 
-  document.getElementById('reset').addEventListener('click', () => {
-    pickers.forEach(p => {
-      apply(p, p.def);
-      p._color.value = norm(p.def);
-      p._hex.value = p.def === 'transparent' ? 'NONE' : p.def.toUpperCase();
-    });
-  });
+        const ratio = (state.outerRadius / state.innerRadius).toFixed(3);
+        
+        document.getElementById('metric-radius-ratio').innerText = `${ratio} : 1`;
+        document.getElementById('metric-outer-sweep').innerText = `${outerSweep.toFixed(1)}°`;
+        document.getElementById('metric-inner-sweep').innerText = `${innerSweep.toFixed(1)}°`;
 
-  function svgString() {
-    const clone = svg.cloneNode(true);
-    const bg = bgEl.style.background;
-    if (bg && bg !== 'transparent' && bg !== '') {
-      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-      rect.setAttribute('x', 0); rect.setAttribute('y', 0);
-      rect.setAttribute('width', 680); rect.setAttribute('height', 680);
-      rect.setAttribute('fill', bg);
-      clone.insertBefore(rect, clone.firstChild);
+        let svgContent = `  <rect x="0" y="0" width="1024" height="1024" fill="${bgColor}" />\n`;
+        
+        // Base Arcs
+        svgContent += `  <g fill="none" stroke="${fgColor}" stroke-width="${state.strokeWidth}" stroke-linecap="round">\n`;
+        svgContent += `    <path d="${describeArc(cx, cy, state.outerRadius, outerStartAngle, outerEndAngle)}" />\n`;
+        svgContent += `    <path d="${describeArc(cx, cy, state.innerRadius, innerStartAngle, innerEndAngle)}" />\n`;
+        
+        // Gap State Machine
+        if (state.bottomArcSpread > 0) {
+            const spreadStart = bottomAngle - state.bottomArcSpread / 2;
+            const spreadEnd = bottomAngle + state.bottomArcSpread / 2;
+            svgContent += `    <path d="${describeArc(cx, cy, state.outerRadius, spreadStart, spreadEnd)}" />\n`;
+        }
+        svgContent += `  </g>\n`;
+
+        if (state.bottomArcSpread === 0) {
+            // Explicit circle using the dotRadius slider
+            const dotY = cy + state.outerRadius; 
+            svgContent += `  <circle cx="${cx}" cy="${dotY}" r="${state.dotRadius}" fill="${fgColor}" />\n`;
+        }
+
+        const svgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="85 85 854 854" width="100%" height="100%" preserveAspectRatio="xMidYMid meet">\n${svgContent}</svg>`;
+
+        document.getElementById('svgPreview').innerHTML = svgString;
+        
+        const iconPreview = document.getElementById('iconPreview');
+        iconPreview.innerHTML = svgString;
+        iconPreview.style.backgroundColor = bgColor;
+        
+        document.getElementById('svgPreview').parentElement.style.backgroundColor = bgColor;
+        document.getElementById('svgOutput').value = svgString;
     }
-    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-    return new XMLSerializer().serializeToString(clone);
-  }
 
-  function download(href, name) {
-    const a = document.createElement('a');
-    a.href = href; a.download = name; a.click();
-  }
+    function toggleInvert() {
+        inverted = !inverted;
+        update();
+    }
 
-  document.getElementById('dlSvg').addEventListener('click', () => {
-    const blob = new Blob([svgString()], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    download(url, 'ring-logo.svg');
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  });
+    function copyToClipboard() {
+        const svgOutput = document.getElementById('svgOutput');
+        svgOutput.select();
+        navigator.clipboard.writeText(svgOutput.value).then(() => {
+            const copyBtn = document.getElementById('copyBtn');
+            const originalText = copyBtn.innerText;
+            copyBtn.innerText = "Copied! ✓";
+            copyBtn.style.backgroundColor = "#2e7d32";
+            setTimeout(() => {
+                copyBtn.innerText = originalText;
+                copyBtn.style.backgroundColor = "var(--accent)";
+            }, 2000);
+        });
+    }
 
-  // ===== Traffic-light palettes =====
-  const palettes = [
-    { name: 'Neon (base)', bg: '#0a0a0c', outer: '#00e676', middle: '#ffea00', inner: '#ff1744', dot: '#00e676' },
-    { name: 'Lime',        bg: '#07090a', outer: '#c6ff00', middle: '#ffea00', inner: '#ff1744', dot: '#39ff14' },
-    { name: 'Emerald',     bg: '#04100b', outer: '#00e676', middle: '#ffc400', inner: '#ff1744', dot: '#00e676' },
-    { name: 'Mint',        bg: '#06100d', outer: '#1de9b6', middle: '#b2ff59', inner: '#ffea00', dot: '#ff3d00' },
-    { name: 'Viper',       bg: '#0a0d05', outer: '#76ff03', middle: '#ffea00', inner: '#ff9100', dot: '#76ff03' },
-    { name: 'Jade',        bg: '#051210', outer: '#00ffa3', middle: '#aeff00', inner: '#ffc400', dot: '#00ffa3' },
-  ];
-
-  const presetWrap = document.getElementById('presets');
-  palettes.forEach(pal => {
-    const btn = document.createElement('button');
-    btn.className = 'preset';
-    btn.innerHTML = `
-      <span class="dots">
-        <span style="background:${pal.outer}"></span>
-        <span style="background:${pal.middle}"></span>
-        <span style="background:${pal.inner}"></span>
-      </span>
-      <span class="pname">${pal.name}</span>`;
-    btn.addEventListener('click', () => {
-      pickers.forEach(p => setPicker(p, pal[p.key]));
-      if (typeof refreshChipDots === 'function') refreshChipDots();
-    });
-    presetWrap.appendChild(btn);
-  });
-
-  document.getElementById('dlPng').addEventListener('click', () => {
-    const size = 1024;
-    const img = new Image();
-    const blob = new Blob([svgString()], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = c.height = size;
-      c.getContext('2d').drawImage(img, 0, 0, size, size);
-      download(c.toDataURL('image/png'), 'ring-logo.png');
-      URL.revokeObjectURL(url);
-    };
-    img.src = url;
-  });
-
-  // ===== Target selector + web-safe grid =====
-  let activeKey = 'outer';
-  const chipWrap = document.getElementById('targetChips');
-
-  pickers.forEach(p => {
-    const chip = document.createElement('button');
-    chip.className = 'chip' + (p.key === activeKey ? ' active' : '');
-    chip.dataset.key = p.key;
-    chip.innerHTML = `<span class="cdot" style="background:${norm(p.def)}"></span>${p.label}`;
-    chip.addEventListener('click', () => {
-      activeKey = p.key;
-      [...chipWrap.children].forEach(c => c.classList.toggle('active', c.dataset.key === activeKey));
-    });
-    chipWrap.appendChild(chip);
-  });
-
-  // keep chip dots in sync with current colours
-  function refreshChipDots() {
-    [...chipWrap.children].forEach(c => {
-      const p = byKey(c.dataset.key);
-      c.querySelector('.cdot').style.background = norm(p.prop === 'background'
-        ? (p.el.style.background || 'transparent') : p.el.getAttribute(p.prop));
-    });
-  }
-
-  const grid = document.getElementById('wsGrid');
-  const steps = ['00', '33', '66', '99', 'cc', 'ff'];
-  for (const r of steps) for (const g of steps) for (const b of steps) {
-    const hex = `#${r}${g}${b}`;
-    const R = parseInt(r, 16), G = parseInt(g, 16), B = parseInt(b, 16);
-    // relative luminance → readable label colour
-    const lum = (0.299 * R + 0.587 * G + 0.114 * B) / 255;
-    const cell = document.createElement('div');
-    cell.className = 'ws-cell';
-    cell.style.background = hex;
-    cell.style.color = lum > 0.55 ? 'rgba(0,0,0,.7)' : 'rgba(255,255,255,.85)';
-    cell.textContent = hex.toUpperCase();
-    cell.title = `${hex.toUpperCase()}  ·  rgb(${R}, ${G}, ${B})`;
-    cell.addEventListener('click', () => {
-      setPicker(byKey(activeKey), hex);
-      refreshChipDots();
-    });
-    grid.appendChild(cell);
-  }
+    update();
 </script>
+
 </body>
 </html>

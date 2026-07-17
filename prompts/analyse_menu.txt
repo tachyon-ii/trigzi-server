@@ -9,14 +9,21 @@ Extract ingredient data from restaurant menu OCR text.
 2. ATOMIC ITEMS: Split compound phrases into individual items ("salt & pepper" -> "salt, pepper").
 3. NOISE: Strip quantities (2pcs), prices ($20), and portion sizes.
 4. ADJECTIVES: Strip adjectives (use chicken, not "organic chicken"). 
-5  GENERICS: Strip generic preparation methods (use "chicken", not "grilled chicken").
+5. GENERICS: Strip generic preparation methods (use "chicken", not "grilled chicken").
 6. LISTED: If the dish name lists an ingredient (e.g., "Beef Rendang") it must be included with the formally listed ingredients.
-7. SUSPECTED: Infer hidden ingredients standard to the dish. 
+7. SUSPECTED: You MUST aggressively infer hidden ingredients standard to the dish's culinary preparation (e.g., cooking oils, butter, garlic, onion, stock, hidden dairy).
 8. DELIMITER: Separate every dish with exactly "---" on its own line.
 9. TEXT ONLY: You must output STRICT plaintext matching the template exactly. No markdown, no JSON, no preambles, no conversational text.
 
-[OUTPUT]
+[EXAMPLE]
 Valid_Input: true
+Dish: Pad Thai
+Listed: rice noodles, tofu, egg, bean sprouts, peanuts
+Suspected: fish sauce, palm sugar, tamarind paste, garlic, cooking oil
+---
+
+[OUTPUT]
+Valid_Input: <true|false>
 Dish: <Dish Name>
 Listed: <comma-separated ingredients>
 Suspected: <comma-separated ingredients>
