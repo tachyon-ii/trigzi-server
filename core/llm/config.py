@@ -93,6 +93,11 @@ class LLMProviderConfig:
                     "defaultModel": "gpt-4o",
                     "models": {},
                     "hierarchy": ["gpt-4o", "gpt-4.1-mini"]
+                },
+                "alibaba": {
+                    "defaultModel": "qwen-max",
+                    "models": {},
+                    "hierarchy": ["qwen-max", "qwen-plus"]
                 }
             }
         }

@@ -296,11 +296,21 @@ class OpenAIProbeMixin(ProbeMixin):  # pylint: disable=too-few-public-methods
     def _model_name_key(self) -> str:
         return "id"   # OpenAI returns {"id": "gpt-4o", ...}
 
+    # Unix timestamp for 2025-01-01 00:00:00 UTC — drop anything older
+    _MIN_CREATED = 1735689600
+
+    # Non-chat model noise: audio, image-gen, video, transcription, search, etc.
+    _NOISE = [
+        "realtime", "audio", "image", "sora", "transcribe",
+        "tts", "search", "codex", "live",
+    ]
+
     def _extract_model_names(self, data: dict) -> List[str]:
         """
-        Return clean OpenAI model identifiers, sorted by `created` timestamp
-        descending (newest first). The `created` timestamp is preserved
-        separately via _extract_model_metadata().
+        Return clean OpenAI chat/reasoning model identifiers:
+        - created 2025+ only
+        - non-chat noise stripped (audio, image, realtime, tts, etc.)
+        - sorted by `created` timestamp descending (newest first)
         """
         models = data.get("data", [])
         models.sort(key=lambda x: x.get("created", 0), reverse=True)
@@ -308,8 +318,14 @@ class OpenAIProbeMixin(ProbeMixin):  # pylint: disable=too-few-public-methods
         names = []
         for m in models:
             name = m.get("id", "")
-            if name:
-                names.append(name)
+            if not name:
+                continue
+            if m.get("created", 0) < self._MIN_CREATED:
+                continue
+            low = name.lower()
+            if any(noise in low for noise in self._NOISE):
+                continue
+            names.append(name)
         return names
 
     def _extract_model_metadata(self, data: dict) -> Dict[str, dict]:

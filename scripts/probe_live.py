@@ -31,6 +31,7 @@ try:
     from core.llm.providers.gemini import GeminiProvider
     from core.llm.providers.claude import ClaudeProvider
     from core.llm.providers.openai import OpenAIProvider
+    from core.llm.providers.alibaba import AlibabaProvider
     from core.llm.probe import ProviderStatus
 except ImportError:
     # Allow running from project root without installing the package
@@ -38,13 +39,15 @@ except ImportError:
     from core.llm.providers.gemini import GeminiProvider
     from core.llm.providers.claude import ClaudeProvider
     from core.llm.providers.openai import OpenAIProvider
+    from core.llm.providers.alibaba import AlibabaProvider
     from core.llm.probe import ProviderStatus
 
 
 PROVIDERS = {
-    "gemini": GeminiProvider,
-    "claude": ClaudeProvider,
-    "openai": OpenAIProvider,
+    "gemini":   GeminiProvider,
+    "claude":   ClaudeProvider,
+    "openai":   OpenAIProvider,
+    "alibaba":  AlibabaProvider,
 }
 
 # Width to align model names against an optional [date] suffix in the
@@ -55,9 +58,10 @@ _NAME_PAD = 38
 def check_env_keys() -> dict[str, bool]:
     """Check which API keys are present in the environment."""
     keys = {
-        "gemini": bool(os.environ.get("GEMINI_API_KEY")),
-        "claude": bool(os.environ.get("CLAUDE_API_KEY")),
-        "openai": bool(os.environ.get("OPENAI_API_KEY")),
+        "gemini":  bool(os.environ.get("GEMINI_API_KEY")),
+        "claude":  bool(os.environ.get("CLAUDE_API_KEY")),
+        "openai":  bool(os.environ.get("OPENAI_API_KEY")),
+        "alibaba": bool(os.environ.get("ALIBABA_API_KEY")),
     }
     return keys
 
@@ -153,11 +157,13 @@ HELP = (
     "  gemini           probe Gemini only\n"
     "  claude           probe Claude only\n"
     "  openai           probe OpenAI only\n"
+    "  alibaba          probe Alibaba (Qwen) only\n"
     "  gemini claude    probe a subset (space-separated)\n"
     "\n"
     "examples:\n"
     "  ./scripts/probe_live.py all\n"
     "  ./scripts/probe_live.py gemini claude\n"
+    "  ./scripts/probe_live.py alibaba\n"
     "  ./scripts/probe_live.py openai"
 )
 
