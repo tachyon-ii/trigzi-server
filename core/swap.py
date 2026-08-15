@@ -10,8 +10,8 @@ Description:   Loads the trigzi-db MinHash LSH swap index at startup and
                provided avoid set (the user's sensitivity canonicals).
 
 Index files (built by trigzi-db/swap/build_index.py):
-    SWAP_INDEX_PATH   default: /var/www/trigzi/data/swap/index.pkl
-    SWAP_META_PATH    default: /var/www/trigzi/data/swap/meta.db
+    SWAP_INDEX_PATH   default: /var/www/trigzi/data/index.pkl
+    SWAP_META_PATH    default: /var/www/trigzi/data/meta.db
 
 Load time: ~6.5 s (once at startup)
 Query time: ~20 ms
@@ -20,6 +20,11 @@ Architecture note:
     The LSH query is CPU-bound and synchronous (datasketch). It is wrapped
     in asyncio.to_thread() so it does not block the Quart event loop.
     The loaded index is a module-level singleton — no per-request loading.
+
+    minhashes are NOT stored in index.pkl. At query time the scanned product's
+    MinHash is reconstructed from its canonicals blob in meta.db. This is correct
+    because MinHash(num_perm, seed=1) uses a fixed permutation matrix — the
+    reconstructed hash is bit-identical to the one inserted at build time.
 =============================================================================
 """
 
@@ -36,17 +41,17 @@ from typing import Optional
 _DATA_ROOT = os.environ.get("TRIGZI_DATA_ROOT", "/var/www/trigzi/data")
 
 SWAP_INDEX_PATH = os.environ.get(
-    "SWAP_INDEX_PATH", os.path.join(_DATA_ROOT, "swap", "index.pkl")
+    "SWAP_INDEX_PATH", os.path.join(_DATA_ROOT, "index.pkl")
 )
 SWAP_META_PATH = os.environ.get(
-    "SWAP_META_PATH", os.path.join(_DATA_ROOT, "swap", "meta.db")
+    "SWAP_META_PATH", os.path.join(_DATA_ROOT, "meta.db")
 )
 
 # ── Singletons ────────────────────────────────────────────────────────────────
 
-_lsh:      Optional[object]              = None   # datasketch MinHashLSH
-_minhashes: Optional[dict]              = None   # gtin_int → MinHash
-_meta_conn: Optional[sqlite3.Connection] = None
+_lsh:       Optional[object]              = None   # datasketch MinHashLSH
+_num_perm:  int                           = 128    # loaded from index.pkl
+_meta_conn: Optional[sqlite3.Connection]  = None
 
 
 def load() -> None:
@@ -54,7 +59,7 @@ def load() -> None:
     Load the swap index from disk. Call once at app startup (before_serving).
     Logs a warning and disables the swap endpoint gracefully if files are absent.
     """
-    global _lsh, _minhashes, _meta_conn  # pylint: disable=global-statement
+    global _lsh, _num_perm, _meta_conn  # pylint: disable=global-statement
 
     if not os.path.exists(SWAP_INDEX_PATH):
         print(f"  ⚠️  swap: index not found at {SWAP_INDEX_PATH} — /swap endpoint disabled")
@@ -64,10 +69,10 @@ def load() -> None:
         with open(SWAP_INDEX_PATH, "rb") as fh:
             payload = pickle.load(fh)
 
-        # build_index.py saves {"lsh": lsh_object, "minhashes": {gtin_int: minhash}}
-        _lsh       = payload["lsh"]
-        _minhashes = payload["minhashes"]
-        print(f"  ✅ swap: index loaded — {len(_minhashes):,} products")
+        # build_index.py saves {"lsh": lsh_object, "num_perm": int}
+        _lsh      = payload["lsh"]
+        _num_perm = payload.get("num_perm", 128)
+        print(f"  ✅ swap: index loaded (num_perm={_num_perm})")
     except Exception as exc:  # pylint: disable=broad-except
         print(f"  ⚠️  swap: failed to load index: {exc}")
         return
@@ -86,10 +91,34 @@ def load() -> None:
 
 def is_available() -> bool:
     """True if the swap index is loaded and queryable."""
-    return _lsh is not None and _minhashes is not None
+    return _lsh is not None and _meta_conn is not None
 
 
 # ── Query ─────────────────────────────────────────────────────────────────────
+
+def _reconstruct_minhash(gtin: int) -> Optional[object]:
+    """
+    Rebuild the MinHash for a product from its canonicals blob in meta.db.
+
+    MinHash(num_perm, seed=1) uses a fixed permutation matrix, so this
+    produces a hash bit-identical to the one inserted at build time.
+    Returns None if the product isn't in meta.db or has no canonicals.
+    """
+    meta = _get_meta(gtin)
+    if meta is None:
+        return None
+    canon_set = set(_decode_canonicals(meta.get("canonicals")))
+    if not canon_set:
+        return None
+    try:
+        from datasketch import MinHash  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return None
+    m = MinHash(num_perm=_num_perm)
+    for cid in canon_set:
+        m.update(cid.to_bytes(2, "little"))
+    return m
+
 
 def _query_sync(
     query_gtin:        int,
@@ -107,7 +136,7 @@ def _query_sync(
     if not is_available():
         return []
 
-    mh = _minhashes.get(query_gtin)  # type: ignore[union-attr]
+    mh = _reconstruct_minhash(query_gtin)
     if mh is None:
         return []
 
@@ -137,7 +166,6 @@ def _query_sync(
         results.append({
             "gtin":       gtin,
             "name":       meta.get("name"),
-            "brand":      meta.get("brand"),
             "nova":       meta.get("nova"),
             "nutriscore": meta.get("nutriscore"),
             "healthstar": meta.get("healthstar"),
@@ -149,10 +177,10 @@ def _query_sync(
 def _get_meta(gtin: int) -> Optional[dict]:
     """Fetch product metadata from meta.db for a candidate GTIN."""
     if _meta_conn is None:
-        return {"canonicals": None, "name": None, "brand": None,
+        return {"canonicals": None, "name": None,
                 "nova": None, "nutriscore": None, "healthstar": None}
     row = _meta_conn.execute(
-        "SELECT name, brand, nova, nutriscore, healthstar, canonicals "
+        "SELECT name, nova, nutriscore, healthstar, canonicals "
         "FROM product_meta WHERE gtin = ?",
         (gtin,),
     ).fetchone()
