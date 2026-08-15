@@ -46,6 +46,7 @@ from .config import config
 from .providers.gemini import GeminiProvider
 from .providers.claude import ClaudeProvider
 from .providers.openai import OpenAIProvider
+from .providers.alibaba import AlibabaProvider
 
 _RESPONSES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'logs', 'llm_responses')
 
@@ -65,9 +66,10 @@ class LLMRouter:  # pylint: disable=too-few-public-methods
 
     def __init__(self):
         self.registry = {
-            "gemini": GeminiProvider(),
-            "claude": ClaudeProvider(),
-            "openai": OpenAIProvider()
+            "gemini":  GeminiProvider(),
+            "claude":  ClaudeProvider(),
+            "openai":  OpenAIProvider(),
+            "alibaba": AlibabaProvider(),
         }
         self._latency_cache: Dict[str, Dict[str, Any]] = {}
 
