@@ -12,8 +12,7 @@
 -- semantic conversion. Nutrition values use the same ×10 integer encoding;
 -- blobs use the same LE uint16_t canonical/category encoding.
 --
--- Run order: schema.sql first, then schema_migrate.sql if upgrading from
--- the old fat-JSON products table.
+-- Fresh install: drop the old database entirely, then run this file.
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 1. Product data
