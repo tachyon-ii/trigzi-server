@@ -21,3 +21,4 @@ datasketch>=1.6.0     # MinHash LSH — loads index.pkl built by trigzi-db
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 jsonschema>=4.25
+urllib3>=2.0.0

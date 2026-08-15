@@ -12,13 +12,18 @@
 -- semantic conversion. Nutrition values use the same ×10 integer encoding;
 -- blobs use the same LE uint16_t canonical/category encoding.
 --
--- Fresh install: drop the old database entirely, then run this file.
+-- Fresh install / reset: source this file directly — it drops and recreates all tables.
+--   mysql -u root -p trigzi < schema.sql
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 1. Product data
 -- ─────────────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS product (
+DROP TABLE IF EXISTS user_image;
+DROP TABLE IF EXISTS gtin_miss_cache;
+DROP TABLE IF EXISTS product;
+
+CREATE TABLE product (
     -- Primary key: EAN-13 as INT64 (matches gtin_cache.db INTEGER PRIMARY KEY)
     gtin            BIGINT NOT NULL PRIMARY KEY,
 
@@ -38,7 +43,7 @@ CREATE TABLE IF NOT EXISTS product (
     img_downloaded  TINYINT UNSIGNED NOT NULL DEFAULT 0,
 
     -- EU-14 allergen bitmask (matches gtin_cache.db allergen INTEGER)
-    allergen        SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    allergen        SMALLINT UNSIGNED DEFAULT NULL,   -- NULL = unknown; 0 = confirmed none
 
     -- Nutrition — integer-encoded (matches gtin_cache.db ×10 scheme)
     -- size_g / serving_g stored as-is (grams)
@@ -84,7 +89,7 @@ CREATE TABLE IF NOT EXISTS product (
 -- on the fly and caches the result here. Subsequent requests return the
 -- cached row without re-running enrichment.
 
-CREATE TABLE IF NOT EXISTS gtin_miss_cache (
+CREATE TABLE gtin_miss_cache (
     gtin            BIGINT NOT NULL PRIMARY KEY,
     country_code    CHAR(2)          NOT NULL DEFAULT 'AU',
 
@@ -92,7 +97,7 @@ CREATE TABLE IF NOT EXISTS gtin_miss_cache (
     name            VARCHAR(512),
     brand           VARCHAR(256),
     raw_ingredients TEXT,
-    allergen        SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    allergen        SMALLINT UNSIGNED DEFAULT NULL,   -- NULL = unknown; 0 = confirmed none
     canonicals      BLOB,
     nova            TINYINT UNSIGNED,
     nutriscore      TINYINT UNSIGNED,
@@ -120,7 +125,7 @@ CREATE TABLE IF NOT EXISTS gtin_miss_cache (
 -- The device_hash is the first 16 hex chars of SHA256(device_id) — enough
 -- to rate-limit and detect bad actors without storing PII.
 
-CREATE TABLE IF NOT EXISTS user_image (
+CREATE TABLE user_image (
     id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     gtin            BIGINT NOT NULL,
 
@@ -156,7 +161,10 @@ CREATE TABLE IF NOT EXISTS user_image (
 -- 3. Server state (unchanged from prior schema)
 -- ─────────────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS enrichments (
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS enrichments;
+
+CREATE TABLE enrichments (
     id          INT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
     task        VARCHAR(50),
     llm_model   VARCHAR(100),
@@ -167,7 +175,7 @@ CREATE TABLE IF NOT EXISTS enrichments (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE sessions (
     device_id            VARCHAR(64)  NOT NULL PRIMARY KEY,
     last_seen_at         DATETIME,
     ip_last              VARCHAR(45),
