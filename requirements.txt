@@ -15,7 +15,7 @@ cryptography>=42.0.0  # Required for modern MariaDB/MySQL auth (caching_sha2_pas
 curl-cffi>=0.6.0      # TLS impersonation for Woolworths/BarcodeLookup
 
 # --- Swap index (Qdrant) ---
-https://github.com/qdrant/qdrant-client/archive/refs/tags/v1.19.0.tar.gz  # 1.19.0 not yet on PyPI; matches server version exactly
+qdrant-client>=1.19.0  # async HTTP client for Qdrant vector DB (replaces datasketch)
 
 # --- Testing & Utilities ---
 pytest>=8.0.0

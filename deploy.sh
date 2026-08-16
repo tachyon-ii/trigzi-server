@@ -10,7 +10,7 @@ fi
 
 # 2. Check virtualenv is active
 if [ -z "$VIRTUAL_ENV" ]; then
-    echo "ERROR: Virtual environment not active. Run: source venv/bin/activate"
+    echo "ERROR: Virtual environment not active. Run: source venv311/bin/activate"
     ERRORS=$((ERRORS + 1))
 fi
 

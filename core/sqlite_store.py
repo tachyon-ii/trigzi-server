@@ -127,7 +127,7 @@ def get_product(gtin_int: int) -> Optional[dict]:
         return None
     with db.lock:
         row = db.conn.execute(
-            "SELECT * FROM product WHERE gtin = ?", (gtin_int,)
+            "SELECT * FROM products WHERE gtin = ?", (gtin_int,)
         ).fetchone()
     if not row:
         return None
@@ -152,7 +152,7 @@ def gtin_exists(gtin_int: int) -> bool:
         return False
     with db.lock:
         row = db.conn.execute(
-            "SELECT 1 FROM product WHERE gtin = ?", (gtin_int,)
+            "SELECT 1 FROM products WHERE gtin = ?", (gtin_int,)
         ).fetchone()
     return row is not None
 
@@ -164,7 +164,7 @@ def all_gtins_for_country(country_code: str = "AU") -> list[int]:
         return []
     with db.lock:
         rows = db.conn.execute(
-            "SELECT gtin FROM product WHERE country = "
+            "SELECT gtin FROM products WHERE country = "
             "(SELECT id FROM country WHERE code = ?)",
             (country_code,)
         ).fetchall()
