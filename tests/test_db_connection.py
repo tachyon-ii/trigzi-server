@@ -3,7 +3,7 @@
 Module:        Test Helper — Database Connection
 Location:      tests/test_db_connection.py
 Description:   Smoke tests confirming the database is reachable and the
-               product table is populated. Uses subprocess + mysql CLI,
+               products table is populated. Uses subprocess + mysql CLI,
                matching how test_luhn.py exports data — no extra drivers
                needed beyond what the OS already has installed.
 
@@ -56,10 +56,10 @@ class TestDatabaseConnection(unittest.TestCase):
 
     def test_product_table_exists(self):
         """Verify the product table exists and contains at least one row."""
-        count = _mysql_query("SELECT COUNT(*) FROM product")
-        self.assertGreater(int(count), 0, "product table is empty or missing")
+        count = _mysql_query("SELECT COUNT(*) FROM products")
+        self.assertGreater(int(count), 0, "products table is empty or missing")
 
     def test_gtin_column_exists(self):
         """Verify the gtin column is present and non-empty."""
-        result = _mysql_query("SELECT gtin FROM product LIMIT 1")
+        result = _mysql_query("SELECT gtin FROM products LIMIT 1")
         self.assertTrue(result, "gtin column missing or empty")
