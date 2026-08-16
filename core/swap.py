@@ -98,11 +98,15 @@ def is_available() -> bool:
 # ── Query ────────────────────────────────────────────────────────────────────
 
 def _decode_canonicals(blob: Optional[bytes]) -> list[int]:
-    """Decode a gtin_cache.db canonicals blob (packed LE uint16_t[]) → list."""
+    """Decode a gtin_cache.db canonicals blob (packed LE uint16_t[]) → list.
+
+    Deduplicates: Qdrant requires unique indices in a sparse vector, and some
+    products carry repeated canonical IDs in their blob (pipeline artefact).
+    """
     if not blob:
         return []
     count = len(blob) // 2
-    return list(struct.unpack_from(f"<{count}H", blob))
+    return list(dict.fromkeys(struct.unpack_from(f"<{count}H", blob)))
 
 
 async def query(
