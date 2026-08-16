@@ -10,7 +10,6 @@ pymysql>=1.1.0
 dbutils>=3.0.0
 aiomysql>=0.2.0
 cryptography>=42.0.0  # Required for modern MariaDB/MySQL auth (caching_sha2_password)
-qdrant-client
 
 # --- Scrapers & Fallbacks ---
 curl-cffi>=0.6.0      # TLS impersonation for Woolworths/BarcodeLookup
