@@ -66,7 +66,8 @@ def _pick_test_gtin() -> int | None:
     try:
         con = sqlite3.connect(f"file:{GTIN_DB}?mode=ro", uri=True)
         row = con.execute(
-            "SELECT gtin FROM product WHERE canonicals IS NOT NULL LIMIT 1"
+            # EAN-8 minimum is 8 digits (10^7); exclude junk/zero GTINs
+            "SELECT gtin FROM product WHERE canonicals IS NOT NULL AND gtin >= 10000000 LIMIT 1"
         ).fetchone()
         con.close()
         return row[0] if row else None
@@ -149,14 +150,13 @@ def test_swap_collection_has_sparse_vector():
 
 def test_swap_collection_has_payload_index():
     """canonical_ids must be indexed for O(log n) allergen pre-filtering."""
-    resp = requests.get(
-        f"{QDRANT_URL}/collections/{COLLECTION}/index", timeout=5
-    )
+    # Payload index info lives in the collection info under result.payload_schema
+    resp = requests.get(f"{QDRANT_URL}/collections/{COLLECTION}", timeout=5)
     assert resp.status_code == 200
-    indices = resp.json().get("result", {}).get("index_status", {})
-    assert "canonical_ids" in indices, (
+    schema = resp.json().get("result", {}).get("payload_schema", {})
+    assert "canonical_ids" in schema, (
         f"Payload index on 'canonical_ids' missing.\n"
-        f"Indices present: {list(indices.keys())}"
+        f"Indexed fields present: {list(schema.keys())}"
     )
 
 
@@ -264,8 +264,9 @@ def test_swap_respects_n_param(test_gtin):
 
 
 def test_swap_unknown_gtin_returns_404():
-    """A GTIN not in the database must return 404 with status=not_found."""
-    resp = requests.get(f"{BASE_URL}/api/v1/swap/0000000000001", timeout=10)
+    """A valid-format GTIN absent from the database must return 404 with status=not_found."""
+    # 9999999999994 is a valid EAN-13 (check digit 4) that will not be in our DB
+    resp = requests.get(f"{BASE_URL}/api/v1/swap/9999999999994", timeout=10)
     assert resp.status_code == 404
     body = resp.json()
     assert body.get("status") == "not_found", f"Expected status=not_found: {body}"

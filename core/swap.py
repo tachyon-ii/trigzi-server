@@ -138,7 +138,6 @@ async def query(
         Filter,
         FieldCondition,
         MatchAny,
-        NamedSparseVector,
         SparseVector,
     )
     from core import sqlite_store  # pylint: disable=import-outside-toplevel
@@ -170,16 +169,15 @@ async def query(
     # score = Σ (query_value × candidate_value) for shared indices
     #       = count of shared canonical IDs  (since all values are 1.0)
     # score_threshold=1.0 ensures at least one shared ingredient.
+    # qdrant-client ≥1.9 uses query_points(); search() was removed in 1.19.
     try:
-        hits = await _client.search(  # type: ignore[union-attr]
+        response = await _client.query_points(  # type: ignore[union-attr]
             collection_name=QDRANT_COLLECTION,
-            query_vector=NamedSparseVector(
-                name=SPARSE_VECTOR_NAME,
-                vector=SparseVector(
-                    indices=canon_ids,
-                    values=[1.0] * len(canon_ids),
-                ),
+            query=SparseVector(
+                indices=canon_ids,
+                values=[1.0] * len(canon_ids),
             ),
+            using=SPARSE_VECTOR_NAME,
             query_filter=query_filter,
             limit=max_results + 5,   # slight over-fetch in case self appears
             with_payload=["name", "nova", "nutriscore", "healthstar"],
@@ -188,6 +186,8 @@ async def query(
     except Exception as exc:  # pylint: disable=broad-except
         print(f"  [!] swap: Qdrant search error: {exc}")
         return []
+
+    hits = response.points  # QueryResponse wraps results in .points
 
     # ── Build response ────────────────────────────────────────────────────────
     results: list[dict] = []
