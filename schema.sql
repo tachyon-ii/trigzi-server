@@ -65,6 +65,7 @@ CREATE TABLE product (
     nutriscore      TINYINT UNSIGNED,     -- 0=A … 4=E
     healthstar      TINYINT UNSIGNED,     -- stars × 2 (0–10)
     egl             TINYINT UNSIGNED,     -- 1=low 2=medium 3=high 4=very high
+    fodmap          TINYINT UNSIGNED,     -- FODMAP risk ×100 (0–100)
 
     -- Binary blobs — N × LE uint16_t (matches gtin_cache.db BLOB encoding)
     categories      BLOB,
@@ -103,6 +104,7 @@ CREATE TABLE gtin_miss_cache (
     nutriscore      TINYINT UNSIGNED,
     healthstar      TINYINT UNSIGNED,
     egl             TINYINT UNSIGNED,
+    fodmap          TINYINT UNSIGNED,     -- FODMAP risk ×100 (0–100)
 
     -- Which enrichment path produced this result
     source          VARCHAR(64),          -- 'ocr', 'barcodelookup', 'llm'
