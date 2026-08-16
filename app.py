@@ -27,6 +27,8 @@ from __future__ import annotations
 import os
 import json
 import logging
+import asyncio
+
 from quart import Quart, jsonify, request, Response
 
 from core import data_manager, sqlite_store, swap as swap_engine
@@ -67,7 +69,10 @@ async def startup():
     """Run once before the server starts accepting requests."""
     await init_pool()
     sqlite_store.open_all()   # gtin_cache.db, ingredient.db, content.db
-    swap_engine.load()        # MinHash LSH index (~6.5 s)
+
+    # Offload the heavy synchronous MinHash load to a background thread
+    # so the ASGI loop can immediately bind to port 5000.
+    asyncio.create_task(asyncio.to_thread(swap_engine.load))
 
 @app.after_serving
 async def shutdown():
