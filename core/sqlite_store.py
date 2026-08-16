@@ -127,7 +127,13 @@ def get_product(gtin_int: int) -> Optional[dict]:
         return None
     with db.lock:
         row = db.conn.execute(
-            "SELECT * FROM products WHERE gtin = ?", (gtin_int,)
+            """
+            SELECT p.*, c.code AS country_code
+            FROM   products p
+            LEFT JOIN country c ON c.id = p.country
+            WHERE  p.gtin = ?
+            """,
+            (gtin_int,)
         ).fetchone()
     if not row:
         return None

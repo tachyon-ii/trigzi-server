@@ -3,7 +3,8 @@
 Module:        Swap Query Client (Qdrant)
 Location:      core/swap.py
 Description:   Finds structurally similar but allergen-safe product
-               alternatives using a Qdrant sparse-vector collection.
+               alternatives using per-country Qdrant sparse-vector
+               collections.
 
 Architecture:
     The swap index lives entirely inside the Qdrant process (Rust, native C).
@@ -11,14 +12,25 @@ Architecture:
     client pointing at Qdrant. There is no in-process index, no pickle, no
     shared-memory headache, and no GIL contention on queries.
 
+Collections:
+    One Qdrant collection per country: swap_au, swap_us, swap_fr, …
+    Named by: f"{QDRANT_COLLECTION_PREFIX}_{country_code.lower()}"
+
+    Benefits over a single filtered collection:
+      - IDF weights are market-specific (vegemite is common in AU, rare
+        globally — a single corpus would undervalue it)
+      - Smaller HNSW graphs → better ANN approximation quality
+      - Clean per-market rebuild without touching other markets
+
 Encoding:
     Each product is stored as a sparse binary vector over the
     canonical-ingredient vocabulary (~2,500 dimensions):
 
-        indices: [14, 102, 2405]
+        indices: [14, 102, 2405]   (sorted; Qdrant requires sorted indices)
         values:  [1.0, 1.0, 1.0]
 
-    Dot-product similarity = count of shared canonical IDs ≈ Jaccard overlap.
+    IDF modifier on the collection dampens ubiquitous ingredients
+    (water, salt, sugar) so rare shared canonicals drive similarity.
 
 Allergen filtering:
     The avoid_canonicals set is translated into a Qdrant MustNot filter and
@@ -34,9 +46,9 @@ Payload per point (stored in Qdrant, returned with results):
     healthstar     — Health Star Rating (1–10)
 
 Environment variables:
-    QDRANT_URL         default: http://localhost:6333
-    QDRANT_API_KEY     optional (Qdrant Cloud only)
-    QDRANT_COLLECTION  default: swap
+    QDRANT_URL                default: http://localhost:6333
+    QDRANT_API_KEY            optional (Qdrant Cloud only)
+    QDRANT_COLLECTION_PREFIX  default: swap  → collections: swap_au, swap_us …
 =============================================================================
 """
 
@@ -46,25 +58,31 @@ import os
 import struct
 from typing import Optional
 
-QDRANT_URL         = os.environ.get("QDRANT_URL",        "http://localhost:6333")
-QDRANT_API_KEY     = os.environ.get("QDRANT_API_KEY",    None)
-QDRANT_COLLECTION  = os.environ.get("QDRANT_COLLECTION", "swap")
-SPARSE_VECTOR_NAME = "canonical"
+QDRANT_URL               = os.environ.get("QDRANT_URL",               "http://localhost:6333")
+QDRANT_API_KEY           = os.environ.get("QDRANT_API_KEY",           None)
+QDRANT_COLLECTION_PREFIX = os.environ.get("QDRANT_COLLECTION_PREFIX", "swap")
+SPARSE_VECTOR_NAME       = "canonical"
 
 _client: Optional[object] = None   # AsyncQdrantClient — typed as object to avoid
                                     # import-time dependency if qdrant-client missing
+_collection_count: int = 0          # number of swap_* collections found at startup
+
+
+def _collection_for(country_code: str) -> str:
+    """Return the Qdrant collection name for a given ISO country code."""
+    return f"{QDRANT_COLLECTION_PREFIX}_{country_code.lower()}"
 
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 
 async def connect() -> None:
     """
-    Create the Qdrant async HTTP client and verify the collection exists.
+    Create the Qdrant async HTTP client and verify swap collections exist.
     Call once per worker from Quart's before_serving hook.
     Degrades gracefully: if Qdrant is unreachable the swap endpoint
     returns 503 rather than crashing the worker.
     """
-    global _client  # pylint: disable=global-statement
+    global _client, _collection_count  # pylint: disable=global-statement
     try:
         from qdrant_client import AsyncQdrantClient  # type: ignore
     except ImportError:
@@ -73,9 +91,21 @@ async def connect() -> None:
 
     client = AsyncQdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY or None)
     try:
-        info = await client.get_collection(QDRANT_COLLECTION)
-        print(f"  ✅ swap: Qdrant '{QDRANT_COLLECTION}' — {info.points_count:,} points")
+        all_collections = await client.get_collections()
+        swap_colls = [
+            c.name for c in all_collections.collections
+            if c.name.startswith(f"{QDRANT_COLLECTION_PREFIX}_")
+        ]
+        if not swap_colls:
+            print(f"  ⚠️  swap: no '{QDRANT_COLLECTION_PREFIX}_*' collections in Qdrant")
+            print(f"       Run: cd trigzi-db && make load-qdrant")
+            await client.close()
+            return
         _client = client
+        _collection_count = len(swap_colls)
+        print(f"  ✅ swap: Qdrant ready — {_collection_count} country collections "
+              f"({', '.join(sorted(swap_colls)[:5])}"
+              f"{'…' if len(swap_colls) > 5 else ''})")
     except Exception as exc:  # pylint: disable=broad-except
         print(f"  ⚠️  swap: Qdrant unreachable at {QDRANT_URL} — {exc}")
         print(f"       /swap will return 503 until Qdrant is available")
@@ -91,22 +121,23 @@ async def disconnect() -> None:
 
 
 def is_available() -> bool:
-    """True when the Qdrant client is connected and the collection is reachable."""
+    """True when the Qdrant client is connected and swap collections exist."""
     return _client is not None
 
 
 # ── Query ────────────────────────────────────────────────────────────────────
 
 def _decode_canonicals(blob: Optional[bytes]) -> list[int]:
-    """Decode a gtin_cache.db canonicals blob (packed LE uint16_t[]) → list.
+    """Decode a gtin_cache.db canonicals blob (packed LE uint16_t[]) → sorted list.
 
-    Deduplicates: Qdrant requires unique indices in a sparse vector, and some
-    products carry repeated canonical IDs in their blob (pipeline artefact).
+    Deduplicates and sorts: Qdrant requires unique, sorted indices in a sparse
+    vector. Some products carry repeated canonical IDs in their blob (pipeline
+    artefact) — dedup is handled here.
     """
     if not blob:
         return []
     count = len(blob) // 2
-    return list(dict.fromkeys(struct.unpack_from(f"<{count}H", blob)))
+    return sorted(set(struct.unpack_from(f"<{count}H", blob)))
 
 
 async def query(
@@ -117,9 +148,9 @@ async def query(
     """
     Find similar-but-safe product alternatives via Qdrant sparse vector search.
 
-    The query product's canonical IDs are looked up from the local SQLite store
-    (already loaded in each worker, O(1) lookup, no network hop). Qdrant then
-    executes the sparse dot-product search with an inline allergen pre-filter.
+    Looks up the query product from local SQLite (O(1), no network hop) to
+    get its canonical IDs and country code, then queries the corresponding
+    per-country Qdrant collection with an inline allergen pre-filter.
 
     Args:
         query_gtin:       EAN-13 as integer (the product the user is holding)
@@ -129,7 +160,7 @@ async def query(
     Returns:
         List of product dicts ranked by ingredient overlap (best first).
         None  — query GTIN is not in our database.
-        []    — GTIN known but no safe alternatives found.
+        []    — GTIN known but no safe alternatives found (or Qdrant down).
     """
     if not _client:
         return []
@@ -142,10 +173,16 @@ async def query(
     )
     from core import sqlite_store  # pylint: disable=import-outside-toplevel
 
-    # ── Resolve query product's canonical IDs from local SQLite ──────────────
+    # ── Resolve query product from local SQLite ───────────────────────────────
     product = sqlite_store.get_product(query_gtin)
     if product is None:
         return None   # GTIN not in gtin_cache.db
+
+    country_code = product.get("country_code")
+    if not country_code:
+        return []     # cannot route to a country collection
+
+    collection = _collection_for(country_code)
 
     canon_ids = _decode_canonicals(product.get("canonicals"))
     if not canon_ids:
@@ -165,14 +202,14 @@ async def query(
             ]
         )
 
-    # ── Sparse dot-product search ─────────────────────────────────────────────
-    # score = Σ (query_value × candidate_value) for shared indices
-    #       = count of shared canonical IDs  (since all values are 1.0)
-    # score_threshold=1.0 ensures at least one shared ingredient.
+    # ── Sparse IDF-weighted search ────────────────────────────────────────────
+    # IDF modifier on the collection downweights ubiquitous ingredients so
+    # rare shared canonicals drive the score. score_threshold=1.0 ensures at
+    # least one meaningful shared ingredient before IDF re-weighting.
     # qdrant-client ≥1.9 uses query_points(); search() was removed in 1.19.
     try:
         response = await _client.query_points(  # type: ignore[union-attr]
-            collection_name=QDRANT_COLLECTION,
+            collection_name=collection,
             query=SparseVector(
                 indices=canon_ids,
                 values=[1.0] * len(canon_ids),
@@ -184,7 +221,7 @@ async def query(
             score_threshold=1.0,
         )
     except Exception as exc:  # pylint: disable=broad-except
-        print(f"  [!] swap: Qdrant search error: {exc}")
+        print(f"  [!] swap: Qdrant error for collection '{collection}': {exc}")
         return []
 
     hits = response.points  # QueryResponse wraps results in .points
@@ -193,7 +230,7 @@ async def query(
     results: list[dict] = []
     for hit in hits:
         if int(hit.id) == query_gtin:
-            continue   # skip self (should not appear given pre-filter, but be safe)
+            continue   # skip self (should not appear, but be safe)
         results.append({
             "gtin":       hit.id,
             "name":       hit.payload.get("name"),
