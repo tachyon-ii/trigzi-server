@@ -27,7 +27,6 @@ from __future__ import annotations
 import os
 import json
 import logging
-import asyncio
 
 from quart import Quart, jsonify, request, Response
 
@@ -66,19 +65,17 @@ MAX_GTIN_LEN = 14
 
 @app.before_serving
 async def startup():
-    """Run once before the server starts accepting requests."""
+    """Run once per worker before accepting requests."""
     await init_pool()
-    sqlite_store.open_all()   # gtin_cache.db, ingredient.db, content.db
-
-    # Offload the heavy synchronous MinHash load to a background thread
-    # so the ASGI loop can immediately bind to port 5000.
-    asyncio.create_task(asyncio.to_thread(swap_engine.load))
+    sqlite_store.open_all()      # gtin_cache.db, ingredient.db, content.db
+    await swap_engine.connect()  # async HTTP client → Qdrant (stateless, no local index)
 
 @app.after_serving
 async def shutdown():
     """Run once when the server is shutting down."""
     await close_pool()
     sqlite_store.close_all()
+    await swap_engine.disconnect()
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"

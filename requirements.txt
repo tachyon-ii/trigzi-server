@@ -14,8 +14,8 @@ cryptography>=42.0.0  # Required for modern MariaDB/MySQL auth (caching_sha2_pas
 # --- Scrapers & Fallbacks ---
 curl-cffi>=0.6.0      # TLS impersonation for Woolworths/BarcodeLookup
 
-# --- Swap index ---
-datasketch>=1.6.0     # MinHash LSH — loads index.pkl built by trigzi-db
+# --- Swap index (Qdrant) ---
+qdrant-client>=1.9.0  # async HTTP client for Qdrant vector DB (replaces datasketch)
 
 # --- Testing & Utilities ---
 pytest>=8.0.0
