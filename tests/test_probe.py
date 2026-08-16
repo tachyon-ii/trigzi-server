@@ -59,17 +59,18 @@ GEMINI_MOCK_PAYLOAD = {
 CLAUDE_EXPECTED = ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
 CLAUDE_MOCK_PAYLOAD = {"data": [{"id": m} for m in CLAUDE_EXPECTED]}
 
-OPENAI_EXPECTED = ["gpt-4o", "gpt-4o-mini", "o3"]
-# OpenAI returns a 'created' unix timestamp per model — the probe layer now
-# uses this to populate ProviderStatus.model_metadata. The values below are
-# arbitrary but deterministic so test assertions can verify the mapping.
+# Models that survive the _MIN_CREATED (2025-01-01) + noise filter.
+OPENAI_EXPECTED = ["o3", "gpt-4.1"]
+
+# Full mock catalogue: includes pre-2025 models to exercise the date filter.
+# Values are real Unix timestamps so metadata spot-checks stay deterministic.
 OPENAI_CREATED = {
-    "gpt-4o":      1715472000,  # 2024-05-12 (UTC)
-    "gpt-4o-mini": 1721260800,  # 2024-07-18 (UTC)
-    "o3":          1744156800,  # 2025-04-09 (UTC)
+    "gpt-4o":  1715472000,   # 2024-05-12 — pre-2025, filtered by _MIN_CREATED
+    "o3":      1744156800,   # 2025-04-09 — included
+    "gpt-4.1": 1744243200,   # 2025-04-10 — included
 }
 OPENAI_MOCK_PAYLOAD = {
-    "data": [{"id": m, "created": OPENAI_CREATED[m]} for m in OPENAI_EXPECTED]
+    "data": [{"id": m, "created": OPENAI_CREATED[m]} for m in OPENAI_CREATED]
 }
 
 
@@ -242,10 +243,10 @@ class TestOpenAIProbe(unittest.IsolatedAsyncioTestCase):
             status = await provider.probe()
 
         self.assertTrue(status.is_reachable)
-        # As of the data/presentation cleanup (April 2026), available_models
-        # contains clean identifiers — no padding, no [date] suffix.
+        # 2025+ models must be present; pre-2025 models must be filtered out.
         for expected_model in OPENAI_EXPECTED:
             self.assertIn(expected_model, status.available_models)
+        self.assertNotIn("gpt-4o", status.available_models)   # 2024-05-12 — filtered
         self.assertEqual(status.credit_remaining, 199)
 
     async def test_model_metadata_populated(self):
@@ -257,19 +258,18 @@ class TestOpenAIProbe(unittest.IsolatedAsyncioTestCase):
         with patch("aiohttp.ClientSession", return_value=session_cm):
             status = await provider.probe()
 
-        # Every model in the response should have a metadata entry.
-        for expected_model in OPENAI_EXPECTED:
-            self.assertIn(expected_model, status.model_metadata)
-            entry = status.model_metadata[expected_model]
+        # Every model in the response gets a metadata entry, including filtered ones.
+        for model in OPENAI_CREATED:
+            self.assertIn(model, status.model_metadata)
+            entry = status.model_metadata[model]
             self.assertIn("created_at", entry)
             # Format: YYYY-MM-DD
             self.assertRegex(entry["created_at"], r"^\d{4}-\d{2}-\d{2}$")
 
-        # Spot-check a known mapping (2024-05-12 from OPENAI_CREATED).
-        self.assertEqual(
-            status.model_metadata["gpt-4o"]["created_at"],
-            "2024-05-12"
-        )
+        # Spot-check known mappings.
+        self.assertEqual(status.model_metadata["gpt-4o"]["created_at"],  "2024-05-12")
+        self.assertEqual(status.model_metadata["o3"]["created_at"],       "2025-04-09")
+        self.assertEqual(status.model_metadata["gpt-4.1"]["created_at"],  "2025-04-10")
 
     async def test_other_providers_have_empty_metadata(self):
         """Gemini and Claude don't expose per-model dates, so model_metadata is {}."""

@@ -154,7 +154,7 @@ async def mark_downloaded(pool: aiomysql.Pool, gtin_int: int, state: int) -> Non
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "UPDATE product SET img_downloaded = %s WHERE gtin = %s",
+                "UPDATE products SET img_downloaded = %s WHERE gtin = %s",
                 (state, gtin_int),
             )
 
