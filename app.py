@@ -31,6 +31,7 @@ import logging
 from quart import Quart, jsonify, request, Response
 
 from core import data_manager, sqlite_store, swap as swap_engine
+from core.serialiser import serialise_product
 from core.db import init_pool, close_pool
 from core.enricher import enrich, patch_nutrition
 from core.analyser import (
@@ -94,7 +95,7 @@ async def get_product(gtin):
         return jsonify({"status": "not_found", "gtin": gtin}), 404
 
     if data_manager.is_enriched(record):
-        return jsonify({"status": "complete", "product": record}), 200
+        return jsonify({"status": "complete", "product": serialise_product(record)}), 200
 
     async def generate():
         try:
@@ -106,7 +107,7 @@ async def get_product(gtin):
             yield _sse("progress", {"message": "Running latest analytics…"})
 
             enriched = await enrich(record)
-            yield _sse("enriched", {"status": "complete", "product": enriched})
+            yield _sse("enriched", {"status": "complete", "product": serialise_product(enriched)})
 
         except Exception as e:
             logger.error("Product enrichment stream crashed: %s", str(e), exc_info=True)
