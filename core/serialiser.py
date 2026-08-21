@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import date, datetime
 
 # ── Locate trigzi-contracts/build/ relative to this file ────────────────────
 #
@@ -43,22 +44,33 @@ _contracts_build = os.environ.get(
 if os.path.isdir(_contracts_build) and _contracts_build not in sys.path:
     sys.path.insert(0, _contracts_build)
 
-import eu14_bitmask as _eu14  # noqa: E402 — path must be set first
-
-# ── EU14 decode table: built from eu14_bitmask constants ─────────────────────
-#
-# Display name rule (from eu14_bitmask.h header comment):
-#   "Token names are canonical — display name is token with _ -> space, title-cased."
-#
-# Sorted by bit value (bit 0 first) so the decoded list is always alphabetical.
-_EU14_DECODE: list[tuple[int, str]] = sorted(
-    [
-        (val, attr[len("TRIGZI_ALLERGEN_"):].replace("_", " ").title())
-        for attr, val in vars(_eu14).items()
-        if attr.startswith("TRIGZI_ALLERGEN_") and isinstance(val, int)
-    ],
-    key=lambda x: x[0],
-)
+try:
+    import eu14_bitmask as _eu14  # noqa: E402 — path must be set first
+    _EU14_DECODE: list[tuple[int, str]] = sorted(
+        [
+            (val, attr[len("TRIGZI_ALLERGEN_"):].replace("_", " ").title())
+            for attr, val in vars(_eu14).items()
+            if attr.startswith("TRIGZI_ALLERGEN_") and isinstance(val, int)
+        ],
+        key=lambda x: x[0],
+    )
+except ModuleNotFoundError:
+    # eu14_bitmask not yet built — fall back to EU 1169/2011 Annex II order.
+    # Replace with generated eu14_bitmask.py once the build pipeline provides it.
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "eu14_bitmask not found — using fallback allergen decode table. "
+        "Run the build pipeline to generate trigzi-contracts/build/eu14_bitmask.py."
+    )
+    _EU14_ALLERGENS_FALLBACK = [
+        "gluten", "crustaceans", "eggs", "fish", "peanuts", "soybeans",
+        "milk", "nuts", "celery", "mustard", "sesame", "sulphites",
+        "lupin", "molluscs",
+    ]
+    _EU14_DECODE = [
+        (1 << bit, name.replace("_", " ").title())
+        for bit, name in enumerate(_EU14_ALLERGENS_FALLBACK)
+    ]
 
 # ── Sources bitmask (SRC_* constants from trigzi-common/include/scores.h) ────
 _SOURCE_NAMES: list[str] = ["woolworths", "coles", "iga", "off"]  # bit 0 … bit 3
@@ -128,6 +140,16 @@ def serialise_product(record: dict) -> dict:
                 out[key] = _NUTRISCORE_GRADE[val]
             else:
                 out[key] = None
+            continue
+
+        # ── Bytes: decode as UTF-8 text (covers any BLOB column not in _OMIT) ─
+        if isinstance(val, (bytes, bytearray)):
+            out[key] = val.decode("utf-8", errors="replace")
+            continue
+
+        # ── Datetime/date: ISO-8601 string ───────────────────────────────────
+        if isinstance(val, (datetime, date)):
+            out[key] = val.isoformat()
             continue
 
         # ── Pass-through (nova, energy_kj, sodium, egl, fodmap, etc.) ────────
