@@ -37,7 +37,7 @@
     "emoji": "🤢",
     "content": "Often a sign of delayed gastric emptying or a localized reaction to a trigger food. If nausea consistently follows meals, it may be linked to high-fat foods, strong spices, or specific intolerances.",
     "actionable_tip": "Note if symptoms occur immediately after eating (stomach) or several hours later (small intestine).",
-    "links": []
+    "links": [["Healthdirect: Nausea", "https://www.healthdirect.gov.au/nausea"]]
   },
   "Vomit": {
     "title": "Vomiting",
@@ -54,7 +54,7 @@
     "content": "Occurs when stomach acid flows back into the esophagus. Common dietary triggers include acidic foods, spicy dishes, caffeine, and high-fat meals which relax the esophageal sphincter.",
     "actionable_tip": "Avoid lying down for at least 2 hours after a triggering meal.",
     "links": [
-      ["Mayo Clinic: GERD & Heartburn", "https://www.mayoclinic.org/diseases-conditions/heartburn/symptoms-causes/syc-20373223"]
+      ["Healthdirect: Heartburn", "https://www.healthdirect.gov.au/heartburn"]
     ]
   },
   "Cramps": {
@@ -132,7 +132,7 @@
     "content": "The gut-skin axis is heavily researched. Imbalances in gut bacteria or spikes in blood sugar can increase sebum production and drive systemic skin inflammation.",
     "actionable_tip": "Look for patterns involving high-sugar, high-dairy, or highly processed food intake.",
     "links": [
-      ["DermNet: Diet and Acne", "https://dermnetnz.org/topics/diet-and-acne"]
+      ["Healthdirect: Acne", "https://www.healthdirect.gov.au/acne"]
     ]
   },
   "Rash": {
@@ -140,7 +140,7 @@
     "emoji": "🧴",
     "content": "Sudden rashes, eczema flare-ups, or hives can indicate a histamine reaction, a localized food allergy, or a compromised gut lining (leaky gut).",
     "actionable_tip": "Note new foods or skin products. If accompanied by swelling or difficulty breathing, seek medical attention immediately.",
-    "links": []
+    "links": [["Healthdirect: Rashes", "https://www.healthdirect.gov.au/rashes"]]
   },
   "Unicorn": {
     "title": "Unicorn Status",
